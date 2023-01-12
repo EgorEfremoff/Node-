@@ -173,7 +173,6 @@ enum class SkipRoot {
   kMainThreadHandles,
   kUnserializable,
   kWeak,
-  kTopOfStack,
   kConservativeStack,
 };
 
@@ -522,7 +521,10 @@ class Heap {
   // Initialize a filler object to keep the ability to iterate over the heap
   // when introducing gaps within pages. This method will verify that no slots
   // are recorded in this free memory.
-  V8_EXPORT_PRIVATE void CreateFillerObjectAt(Address addr, int size);
+  V8_EXPORT_PRIVATE void CreateFillerObjectAt(
+      Address addr, int size,
+      ClearFreedMemoryMode clear_memory_mode =
+          ClearFreedMemoryMode::kDontClearFreedMemory);
 
   // Initialize a filler object at a specific address. Unlike
   // `CreateFillerObjectAt` this method will not perform slot verification since
@@ -659,8 +661,6 @@ class Heap {
     return ignore_local_gc_requests_depth_ > 0;
   }
 
-  inline bool IsInGCPostProcessing() { return gc_post_processing_depth_ > 0; }
-
   bool IsGCWithStack() const;
 
   // Performs GC after background allocation failure.
@@ -670,7 +670,8 @@ class Heap {
   // Support for the API.
   //
 
-  void CreateApiObjects();
+  void CreateReadOnlyApiObjects();
+  void CreateMutableApiObjects();
 
   // Implements the corresponding V8 API function.
   bool IdleNotification(double deadline_in_seconds);
@@ -813,7 +814,8 @@ class Heap {
 
   // Bootstraps the object heap with the core set of objects required to run.
   // Returns whether it succeeded.
-  bool CreateHeapObjects();
+  bool CreateReadOnlyHeapObjects();
+  bool CreateMutableHeapObjects();
 
   // Create ObjectStats if live_object_stats_ or dead_object_stats_ are nullptr.
   void CreateObjectStats();
@@ -894,7 +896,13 @@ class Heap {
   // range if it exists or empty region otherwise.
   const base::AddressRegion& code_region();
 
-  CodeRange* code_range() { return code_range_.get(); }
+  CodeRange* code_range() {
+#if V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+    return code_range_;
+#else
+    return code_range_.get();
+#endif
+  }
 
   // The base of the code range if it exists or null address.
   inline Address code_range_base();
@@ -1029,16 +1037,12 @@ class Heap {
   // garbage collection and is usually only performed as part of
   // (de)serialization or heap verification.
 
-  // The order of this enumeration's elements is important: they should go from
-  // more precise to more conservative modes for stack scanning, so that we can
-  // use std::min to override for testing purposes.
-  enum class ScanStackMode { kNone, kFromMarker, kComplete };
-
   // Iterates over the strong roots and the weak roots.
   void IterateRoots(RootVisitor* v, base::EnumSet<SkipRoot> options);
   void IterateRootsIncludingClients(RootVisitor* v,
                                     base::EnumSet<SkipRoot> options);
-  void IterateRootsFromStackIncludingClient(RootVisitor* v, ScanStackMode mode);
+  void IterateRootsFromStackIncludingClients(RootVisitor* v,
+                                             StackState stack_state);
 
   // Iterates over entries in the smi roots list.  Only interesting to the
   // serializer/deserializer, since GC does not care about smis.
@@ -1047,7 +1051,7 @@ class Heap {
   void IterateWeakRoots(RootVisitor* v, base::EnumSet<SkipRoot> options);
   void IterateWeakGlobalHandles(RootVisitor* v);
   void IterateBuiltins(RootVisitor* v);
-  void IterateStackRoots(RootVisitor* v, ScanStackMode mode);
+  void IterateStackRoots(RootVisitor* v, StackState stack_state);
 
   // ===========================================================================
   // Remembered set API. =======================================================
@@ -1099,7 +1103,7 @@ class Heap {
       GarbageCollectionReason gc_reason);
 
   V8_EXPORT_PRIVATE void CompleteSweepingFull();
-  void CompleteSweepingYoung(GarbageCollector collector);
+  void CompleteSweepingYoung();
 
   // Ensures that sweeping is finished for that object's page.
   void EnsureSweepingCompletedForObject(HeapObject object);
@@ -1156,16 +1160,6 @@ class Heap {
   LocalEmbedderHeapTracer* local_embedder_heap_tracer() const {
     return local_embedder_heap_tracer_.get();
   }
-
-  START_ALLOW_USE_DEPRECATED()
-
-  V8_EXPORT_PRIVATE void SetEmbedderHeapTracer(EmbedderHeapTracer* tracer);
-  EmbedderHeapTracer* GetEmbedderHeapTracer() const;
-  EmbedderHeapTracer::TraceFlags flags_for_embedder_tracer() const;
-
-  END_ALLOW_USE_DEPRECATED()
-
-  void RegisterExternallyReferencedObject(Address* location);
 
   // ===========================================================================
   // Unified heap (C++) support. ===============================================
@@ -1671,7 +1665,7 @@ class Heap {
 
   AtomicMarkingState* atomic_marking_state() { return &atomic_marking_state_; }
 
-  PretenturingHandler* pretenuring_handler() { return &pretenuring_handler_; }
+  PretenuringHandler* pretenuring_handler() { return &pretenuring_handler_; }
 
  private:
   class AllocationTrackerForDebugging;
@@ -1809,9 +1803,10 @@ class Heap {
 
   inline void UpdateOldSpaceLimits();
 
-  bool CreateInitialMaps();
+  bool CreateInitialReadOnlyMaps();
   void CreateInternalAccessorInfoObjects();
-  void CreateInitialObjects();
+  void CreateInitialMutableObjects();
+  void CreateInitialReadOnlyObjects();
 
   // Zaps the memory of a code object.
   V8_EXPORT_PRIVATE void ZapCodeObject(Address start_address,
@@ -1947,7 +1942,10 @@ class Heap {
 
   void UpdateTotalGCTime(double duration);
 
-  bool MaximumSizeMinorGC() { return maximum_size_minor_gcs_ > 0; }
+  bool MaximumSizeMinorGC() const { return maximum_size_minor_gcs_ > 0; }
+  bool IsFirstMaximumSizeMinorGC() const {
+    return maximum_size_minor_gcs_ == 1;
+  }
 
   bool IsIneffectiveMarkCompact(size_t old_generation_size,
                                 double mutator_utilization);
@@ -1997,8 +1995,8 @@ class Heap {
   V8_EXPORT_PRIVATE bool CanExpandOldGenerationBackground(LocalHeap* local_heap,
                                                           size_t size);
 
-  bool ShouldExpandOldGenerationOnSlowAllocation(
-      LocalHeap* local_heap = nullptr);
+  bool ShouldExpandOldGenerationOnSlowAllocation(LocalHeap* local_heap,
+                                                 AllocationOrigin origin);
   bool IsRetryOfFailedAllocation(LocalHeap* local_heap);
   bool IsMainThreadParked(LocalHeap* local_heap);
   bool IsMajorMarkingComplete(LocalHeap* local_heap);
@@ -2042,7 +2040,8 @@ class Heap {
 
   // Allocates a JS Map in the heap.
   V8_WARN_UNUSED_RESULT AllocationResult
-  AllocateMap(InstanceType instance_type, int instance_size,
+  AllocateMap(AllocationType allocation_type, InstanceType instance_type,
+              int instance_size,
               ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND,
               int inobject_properties = 0);
 
@@ -2205,8 +2204,6 @@ class Heap {
 
   std::atomic<HeapState> gc_state_{NOT_IN_GC};
 
-  int gc_post_processing_depth_ = 0;
-
   // Returns the amount of external memory registered since last global gc.
   V8_EXPORT_PRIVATE uint64_t AllocatedExternalMemorySinceMarkCompact();
 
@@ -2316,7 +2313,11 @@ class Heap {
   //
   // Owned by the heap when !V8_COMPRESS_POINTERS_IN_SHARED_CAGE, otherwise is
   // process-wide.
-  std::shared_ptr<CodeRange> code_range_;
+#if V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+  CodeRange* code_range_ = nullptr;
+#else
+  std::unique_ptr<CodeRange> code_range_;
+#endif
 
   // The embedder owns the C++ heap.
   v8::CppHeap* cpp_heap_ = nullptr;
@@ -2391,7 +2392,6 @@ class Heap {
   bool force_oom_ = false;
   bool force_gc_on_next_allocation_ = false;
   bool delay_sweeper_tasks_for_testing_ = false;
-  ScanStackMode scan_stack_mode_for_testing_ = ScanStackMode::kComplete;
 
   UnorderedHeapObjectMap<HeapObject> retainer_;
   UnorderedHeapObjectMap<Root> retaining_root_;
@@ -2414,7 +2414,10 @@ class Heap {
   NonAtomicMarkingState non_atomic_marking_state_;
   AtomicMarkingState atomic_marking_state_;
 
-  PretenturingHandler pretenuring_handler_;
+  PretenuringHandler pretenuring_handler_;
+
+  // This field is used only when not running with MinorMC.
+  ResizeNewSpaceMode resize_new_space_mode_ = ResizeNewSpaceMode::kNone;
 
   // Classes in "heap" can be friends.
   friend class AlwaysAllocateScope;
@@ -2423,10 +2426,10 @@ class Heap {
   friend class CollectorBase;
   friend class ConcurrentAllocator;
   friend class ConcurrentMarking;
+  friend class ConservativeTracedHandlesMarkingVisitor;
   friend class EvacuateVisitorBase;
   friend class GCCallbacksScope;
   friend class GCTracer;
-  friend class GlobalHandleMarkingVisitor;
   friend class HeapAllocator;
   friend class HeapObjectIterator;
   friend class HeapVerifier;
@@ -2439,7 +2442,6 @@ class Heap {
   friend class LocalHeap;
   friend class MarkingBarrier;
   friend class OldLargeObjectSpace;
-  friend class OptionalAlwaysAllocateScope;
   template <typename ConcreteVisitor, typename MarkingState>
   friend class MarkingVisitorBase;
   friend class MarkCompactCollector;
@@ -2451,9 +2453,9 @@ class Heap {
   friend class ObjectStatsCollector;
   friend class Page;
   friend class PagedSpaceBase;
-  friend class PretenturingHandler;
+  friend class PretenuringHandler;
   friend class ReadOnlyRoots;
-  friend class ScanStackModeScopeForTesting;
+  friend class DisableConservativeStackScanningScopeForTesting;
   friend class Scavenger;
   friend class ScavengerCollector;
   friend class StressConcurrentAllocationObserver;
@@ -2539,24 +2541,6 @@ class V8_NODISCARD GCCallbacksScope final {
 
  private:
   Heap* const heap_;
-};
-
-// Like AlwaysAllocateScope if the heap argument to the constructor is
-// non-null. No-op otherwise.
-//
-// This class exists because AlwaysAllocateScope doesn't compose with
-// base::Optional, since supporting that composition requires making
-// base::Optional a friend class, defeating the purpose of hiding its
-// constructor.
-class V8_NODISCARD OptionalAlwaysAllocateScope {
- public:
-  inline ~OptionalAlwaysAllocateScope();
-
- private:
-  friend class Heap;
-
-  explicit inline OptionalAlwaysAllocateScope(Heap* heap);
-  Heap* heap_;
 };
 
 class V8_NODISCARD AlwaysAllocateScopeForTesting {
@@ -2673,57 +2657,15 @@ class V8_NODISCARD IgnoreLocalGCRequests {
   Heap* heap_;
 };
 
-class V8_NODISCARD ScanStackModeScopeForTesting {
+// TODO(v8:13493): This class will move to src/heap/base/stack.h once its
+// implementation no longer needs access to V8 flags.
+class V8_EXPORT_PRIVATE V8_NODISCARD SaveStackContextScope {
  public:
-  explicit inline ScanStackModeScopeForTesting(Heap* heap,
-                                               Heap::ScanStackMode mode)
-      : heap_(heap), old_value_(heap_->scan_stack_mode_for_testing_) {
-    heap_->scan_stack_mode_for_testing_ = mode;
-  }
-
-  inline ~ScanStackModeScopeForTesting() {
-    heap_->scan_stack_mode_for_testing_ = old_value_;
-  }
+  explicit SaveStackContextScope(::heap::base::Stack* stack);
+  ~SaveStackContextScope();
 
  protected:
-  Heap* heap_;
-  Heap::ScanStackMode old_value_;
-};
-
-// Visitor class to verify interior pointers in spaces that do not contain
-// or care about inter-generational references. All heap object pointers have to
-// point into the heap to a location that has a map pointer at its first word.
-// Caveat: Heap::Contains is an approximation because it can return true for
-// objects in a heap space but above the allocation pointer.
-class VerifyPointersVisitor : public ObjectVisitorWithCageBases,
-                              public RootVisitor {
- public:
-  V8_INLINE explicit VerifyPointersVisitor(Heap* heap);
-  void VisitPointers(HeapObject host, ObjectSlot start,
-                     ObjectSlot end) override;
-  void VisitPointers(HeapObject host, MaybeObjectSlot start,
-                     MaybeObjectSlot end) override;
-  void VisitCodePointer(HeapObject host, CodeObjectSlot slot) override;
-  void VisitCodeTarget(Code host, RelocInfo* rinfo) override;
-  void VisitEmbeddedPointer(Code host, RelocInfo* rinfo) override;
-
-  void VisitRootPointers(Root root, const char* description,
-                         FullObjectSlot start, FullObjectSlot end) override;
-  void VisitRootPointers(Root root, const char* description,
-                         OffHeapObjectSlot start,
-                         OffHeapObjectSlot end) override;
-
- protected:
-  V8_INLINE void VerifyHeapObjectImpl(HeapObject heap_object);
-  V8_INLINE void VerifyCodeObjectImpl(HeapObject heap_object);
-
-  template <typename TSlot>
-  V8_INLINE void VerifyPointersImpl(TSlot start, TSlot end);
-
-  virtual void VerifyPointers(HeapObject host, MaybeObjectSlot start,
-                              MaybeObjectSlot end);
-
-  Heap* heap_;
+  ::heap::base::Stack* stack_;
 };
 
 // Space iterator for iterating over all the paged spaces of the heap: Map
@@ -2790,6 +2732,7 @@ class V8_EXPORT_PRIVATE HeapObjectIterator {
   SpaceIterator* space_iterator_;
   // Object iterator for the space currently being iterated.
   std::unique_ptr<ObjectIterator> object_iterator_;
+  SaveStackContextScope stack_context_scope_;
 
   DISALLOW_GARBAGE_COLLECTION(no_heap_allocation_)
 };
@@ -2878,6 +2821,17 @@ class V8_EXPORT_PRIVATE V8_NODISCARD EmbedderStackStateScope final {
 
   LocalEmbedderHeapTracer* const local_tracer_;
   const StackState old_stack_state_;
+};
+
+class V8_NODISCARD DisableConservativeStackScanningScopeForTesting {
+ public:
+  explicit inline DisableConservativeStackScanningScopeForTesting(Heap* heap)
+      : embedder_scope_(EmbedderStackStateScope::ExplicitScopeForTesting(
+            heap->local_embedder_heap_tracer(),
+            cppgc::EmbedderStackState::kNoHeapPointers)) {}
+
+ private:
+  EmbedderStackStateScope embedder_scope_;
 };
 
 class V8_NODISCARD CppClassNamesAsHeapObjectNameScope final {

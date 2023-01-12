@@ -220,8 +220,7 @@ class Builtins {
   static void Generate_Adaptor(MacroAssembler* masm, Address builtin_address);
 
   static void Generate_CEntry(MacroAssembler* masm, int result_size,
-                              SaveFPRegsMode save_doubles, ArgvMode argv_mode,
-                              bool builtin_exit_frame);
+                              ArgvMode argv_mode, bool builtin_exit_frame);
 
   static bool AllowDynamicFunction(Isolate* isolate, Handle<JSFunction> target,
                                    Handle<JSObject> target_global_proxy);
@@ -358,5 +357,18 @@ Builtin ExampleBuiltinForTorqueFunctionPointerType(
 
 }  // namespace internal
 }  // namespace v8
+
+// Helper while transitioning some functions to libm.
+#if defined(V8_USE_LIBM_TRIG_FUNCTIONS)
+#define SIN_IMPL(X)                                             \
+  v8_flags.use_libm_trig_functions ? base::ieee754::libm_sin(X) \
+                                   : base::ieee754::fdlibm_sin(X)
+#define COS_IMPL(X)                                             \
+  v8_flags.use_libm_trig_functions ? base::ieee754::libm_cos(X) \
+                                   : base::ieee754::fdlibm_cos(X)
+#else
+#define SIN_IMPL(X) base::ieee754::sin(X)
+#define COS_IMPL(X) base::ieee754::cos(X)
+#endif
 
 #endif  // V8_BUILTINS_BUILTINS_H_

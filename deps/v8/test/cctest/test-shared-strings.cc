@@ -57,9 +57,13 @@ class MultiClientIsolateTest {
     v8::Isolate::CreateParams create_params;
     create_params.array_buffer_allocator = allocator.get();
     main_isolate_ = v8::Isolate::New(create_params);
+    i_main_isolate()->Enter();
   }
 
-  ~MultiClientIsolateTest() { main_isolate_->Dispose(); }
+  ~MultiClientIsolateTest() {
+    i_main_isolate()->Exit();
+    main_isolate_->Dispose();
+  }
 
   v8::Isolate* main_isolate() const { return main_isolate_; }
 
@@ -353,24 +357,28 @@ Handle<FixedArray> CreateSharedOneByteStrings(Isolate* isolate,
                                               bool internalize = false) {
   Handle<FixedArray> shared_strings =
       factory->NewFixedArray(count, AllocationType::kSharedOld);
-  for (int i = 0; i < count; i++) {
-    char* ascii = new char[i + min_length + 1];
-    // Don't make single character strings, which will end up deduplicating to
-    // an RO string and mess up the string table hit test.
-    for (int j = 0; j < i + min_length; j++) ascii[j] = 'a';
-    ascii[i + min_length] = '\0';
-    if (internalize) {
-      // When testing concurrent string table hits, pre-internalize a string of
-      // the same contents so all subsequent internalizations are hits.
-      factory->InternalizeString(factory->NewStringFromAsciiChecked(ascii));
+  {
+    // Create strings in their own scope to be able to delete and GC them.
+    HandleScope scope(isolate);
+    for (int i = 0; i < count; i++) {
+      char* ascii = new char[i + min_length + 1];
+      // Don't make single character strings, which will end up deduplicating to
+      // an RO string and mess up the string table hit test.
+      for (int j = 0; j < i + min_length; j++) ascii[j] = 'a';
+      ascii[i + min_length] = '\0';
+      if (internalize) {
+        // When testing concurrent string table hits, pre-internalize a string
+        // of the same contents so all subsequent internalizations are hits.
+        factory->InternalizeString(factory->NewStringFromAsciiChecked(ascii));
+      }
+      Handle<String> string = String::Share(
+          isolate,
+          factory->NewStringFromAsciiChecked(ascii, AllocationType::kOld));
+      CHECK(string->IsShared());
+      string->EnsureHash();
+      shared_strings->set(i, *string);
+      delete[] ascii;
     }
-    Handle<String> string = String::Share(
-        isolate,
-        factory->NewStringFromAsciiChecked(ascii, AllocationType::kOld));
-    CHECK(string->IsShared());
-    string->EnsureHash();
-    shared_strings->set(i, *string);
-    delete[] ascii;
   }
   return shared_strings;
 }
@@ -537,6 +545,7 @@ class OneByteResource : public v8::String::ExternalOneByteStringResource {
   const char* data() const override { return data_; }
   size_t length() const override { return length_; }
   void Dispose() override {
+    CHECK(!IsDisposed());
     i::DeleteArray(data_);
     data_ = nullptr;
   }
@@ -1052,6 +1061,7 @@ UNINITIALIZED_TEST(InternalizedSharedStringsTransitionDuringGC) {
   if (!V8_CAN_CREATE_SHARED_HEAP_BOOL) return;
 
   v8_flags.shared_string_table = true;
+  v8_flags.transition_strings_during_gc_with_stack = true;
 
   constexpr int kStrings = 4096;
 
@@ -1195,6 +1205,7 @@ UNINITIALIZED_TEST(ExternalizedSharedStringsTransitionDuringGC) {
   if (!V8_CAN_CREATE_SHARED_HEAP_BOOL) return;
 
   v8_flags.shared_string_table = true;
+  v8_flags.transition_strings_during_gc_with_stack = true;
 
   ExternalResourceFactory resource_factory;
   MultiClientIsolateTest test;
@@ -1314,6 +1325,7 @@ UNINITIALIZED_TEST(InternalizeSharedExternalString) {
   if (!V8_CAN_CREATE_SHARED_HEAP_BOOL) return;
 
   v8_flags.shared_string_table = true;
+  v8_flags.transition_strings_during_gc_with_stack = true;
 
   ExternalResourceFactory resource_factory;
   MultiClientIsolateTest test;
@@ -1562,6 +1574,7 @@ namespace {
 void CreateExternalResources(Isolate* i_isolate, Handle<FixedArray> strings,
                              std::vector<OneByteResource*>& resources,
                              ExternalResourceFactory& resource_factory) {
+  HandleScope scope(i_isolate);
   resources.reserve(strings->length());
   for (int i = 0; i < strings->length(); i++) {
     Handle<String> input_string(String::cast(strings->get(i)), i_isolate);
@@ -1574,12 +1587,55 @@ void CreateExternalResources(Isolate* i_isolate, Handle<FixedArray> strings,
   }
 }
 
+void CheckStringAndResource(
+    String string, int index, bool should_be_alive, String deleted_string,
+    bool check_transition, bool shared_resources,
+    const std::vector<std::unique_ptr<ConcurrentExternalizationThread>>&
+        threads) {
+  if (check_transition) {
+    if (should_be_alive) {
+      CHECK(string.IsExternalString());
+    } else {
+      CHECK_EQ(string, deleted_string);
+    }
+  }
+  int alive_resources = 0;
+  for (size_t t = 0; t < threads.size(); t++) {
+    ConcurrentExternalizationThread* thread = threads[t].get();
+    if (!thread->Resource(index)->IsDisposed()) {
+      alive_resources++;
+    }
+  }
+
+  // Check exact alive resources only if the string has transitioned, otherwise
+  // there can still be mulitple resource instances in the forwarding table.
+  // Only check no resource is alive if the string is dead.
+  const bool check_alive = check_transition || !should_be_alive;
+  if (check_alive) {
+    size_t expected_alive;
+    if (should_be_alive) {
+      if (shared_resources) {
+        // Since we share the same resource for all threads, we accounted for it
+        // in every thread.
+        expected_alive = threads.size();
+      } else {
+        // Check that exactly one resource is alive.
+        expected_alive = 1;
+      }
+    } else {
+      expected_alive = 0;
+    }
+    CHECK_EQ(alive_resources, expected_alive);
+  }
+}
+
 }  // namespace
 
 void TestConcurrentExternalization(bool share_resources) {
   if (!V8_CAN_CREATE_SHARED_HEAP_BOOL) return;
 
   v8_flags.shared_string_table = true;
+  v8_flags.transition_strings_during_gc_with_stack = true;
 
   ExternalResourceFactory resource_factory;
   MultiClientIsolateTest test;
@@ -1639,23 +1695,8 @@ void TestConcurrentExternalization(bool share_resources) {
     Handle<String> input_string(String::cast(shared_strings->get(i)),
                                 i_isolate);
     String string = *input_string;
-    CHECK(string.IsExternalString());
-    int alive_resources = 0;
-    for (int t = 0; t < kThreads; t++) {
-      ConcurrentExternalizationThread* thread = threads[t].get();
-      if (!thread->Resource(i)->IsDisposed()) {
-        alive_resources++;
-      }
-    }
-
-    if (share_resources) {
-      // Since we share the same resource for all threads, we accounted for it
-      // in every thread.
-      CHECK_EQ(alive_resources, kThreads);
-    } else {
-      // Check that exaclty one resource is alive.
-      CHECK_EQ(alive_resources, 1);
-    }
+    CheckStringAndResource(string, i, true, String{}, true, share_resources,
+                           threads);
   }
 
   ParkedScope parked(local_isolate);
@@ -1672,11 +1713,138 @@ UNINITIALIZED_TEST(ConcurrentExternalizationWithSharedResources) {
   TestConcurrentExternalization(true);
 }
 
+void TestConcurrentExternalizationWithDeadStrings(bool share_resources,
+                                                  bool transition_with_stack) {
+  if (!V8_CAN_CREATE_SHARED_HEAP_BOOL) return;
+
+  v8_flags.shared_string_table = true;
+  v8_flags.transition_strings_during_gc_with_stack = transition_with_stack;
+
+  ExternalResourceFactory resource_factory;
+  MultiClientIsolateTest test;
+
+  constexpr int kThreads = 4;
+  constexpr int kStrings = 12;
+
+  Isolate* i_isolate = test.i_main_isolate();
+  Factory* factory = i_isolate->factory();
+
+  HandleScope scope(i_isolate);
+
+  Handle<FixedArray> shared_strings = CreateSharedOneByteStrings(
+      i_isolate, factory, kStrings, ExternalString::kUncachedSize, false);
+
+  ParkingSemaphore sema_ready(0);
+  ParkingSemaphore sema_execute_start(0);
+  ParkingSemaphore sema_execute_complete(0);
+  std::vector<std::unique_ptr<ConcurrentExternalizationThread>> threads;
+  std::vector<OneByteResource*> shared_resources;
+
+  if (share_resources) {
+    CreateExternalResources(i_isolate, shared_strings, shared_resources,
+                            resource_factory);
+  }
+
+  for (int i = 0; i < kThreads; i++) {
+    std::vector<OneByteResource*> local_resources;
+    if (share_resources) {
+      local_resources = shared_resources;
+    } else {
+      CreateExternalResources(i_isolate, shared_strings, local_resources,
+                              resource_factory);
+    }
+    auto thread = std::make_unique<ConcurrentExternalizationThread>(
+        &test, shared_strings, local_resources, share_resources, &sema_ready,
+        &sema_execute_start, &sema_execute_complete);
+    CHECK(thread->Start());
+    threads.push_back(std::move(thread));
+  }
+
+  LocalIsolate* local_isolate = i_isolate->main_thread_local_isolate();
+  for (int i = 0; i < kThreads; i++) {
+    sema_ready.ParkedWait(local_isolate);
+  }
+  for (int i = 0; i < kThreads; i++) {
+    sema_execute_start.Signal();
+  }
+  for (int i = 0; i < kThreads; i++) {
+    sema_execute_complete.ParkedWait(local_isolate);
+  }
+
+  Handle<String> empty_string =
+      handle(ReadOnlyRoots(i_isolate->heap()).empty_string(), i_isolate);
+  for (int i = 0; i < shared_strings->length(); i++) {
+    Handle<String> input_string(String::cast(shared_strings->get(i)),
+                                i_isolate);
+    // Patch every third string to empty. The next GC will dispose the external
+    // resources.
+    if (i % 3 == 0) {
+      input_string.PatchValue(*empty_string);
+      shared_strings->set(i, *input_string);
+    }
+  }
+
+  i_isolate->heap()->CollectGarbageShared(i_isolate->main_thread_local_heap(),
+                                          GarbageCollectionReason::kTesting);
+
+  for (int i = 0; i < shared_strings->length(); i++) {
+    Handle<String> input_string(String::cast(shared_strings->get(i)),
+                                i_isolate);
+    const bool should_be_alive = i % 3 != 0;
+    String string = *input_string;
+    CheckStringAndResource(string, i, should_be_alive, *empty_string,
+                           transition_with_stack, share_resources, threads);
+  }
+
+  // If we didn't test transitions during GC with stack, trigger another GC
+  // (allowing transitions with stack) to ensure everything is handled
+  // correctly.
+  if (!transition_with_stack) {
+    v8_flags.transition_strings_during_gc_with_stack = true;
+
+    i_isolate->heap()->CollectGarbageShared(i_isolate->main_thread_local_heap(),
+                                            GarbageCollectionReason::kTesting);
+
+    for (int i = 0; i < shared_strings->length(); i++) {
+      Handle<String> input_string(String::cast(shared_strings->get(i)),
+                                  i_isolate);
+      const bool should_be_alive = i % 3 != 0;
+      String string = *input_string;
+      CheckStringAndResource(string, i, should_be_alive, *empty_string, true,
+                             share_resources, threads);
+    }
+  }
+
+  ParkedScope parked(local_isolate);
+  for (auto& thread : threads) {
+    thread->ParkedJoin(parked);
+  }
+}
+
+UNINITIALIZED_TEST(
+    ExternalizationWithDeadStringsAndUniqueResourcesTransitionWithStack) {
+  TestConcurrentExternalizationWithDeadStrings(false, true);
+}
+
+UNINITIALIZED_TEST(
+    ExternalizationWithDeadStringsAndSharedResourcesTransitionWithStack) {
+  TestConcurrentExternalizationWithDeadStrings(true, true);
+}
+
+UNINITIALIZED_TEST(ExternalizationWithDeadStringsAndUniqueResources) {
+  TestConcurrentExternalizationWithDeadStrings(false, false);
+}
+
+UNINITIALIZED_TEST(ExternalizationWithDeadStringsAndSharedResources) {
+  TestConcurrentExternalizationWithDeadStrings(true, false);
+}
+
 void TestConcurrentExternalizationAndInternalization(
     TestHitOrMiss hit_or_miss) {
   if (!V8_CAN_CREATE_SHARED_HEAP_BOOL) return;
 
   v8_flags.shared_string_table = true;
+  v8_flags.transition_strings_during_gc_with_stack = true;
 
   ExternalResourceFactory resource_factory;
   MultiClientIsolateTest test;
@@ -1772,6 +1940,107 @@ UNINITIALIZED_TEST(ConcurrentExternalizationAndInternalizationMiss) {
 
 UNINITIALIZED_TEST(ConcurrentExternalizationAndInternalizationHit) {
   TestConcurrentExternalizationAndInternalization(kTestHit);
+}
+
+UNINITIALIZED_TEST(SharedStringInGlobalHandle) {
+  if (!V8_CAN_CREATE_SHARED_HEAP_BOOL) return;
+
+  v8_flags.shared_string_table = true;
+
+  MultiClientIsolateTest test;
+  Isolate* i_isolate = test.i_main_isolate();
+  Factory* factory = i_isolate->factory();
+
+  HandleScope handle_scope(i_isolate);
+  Handle<String> shared_string =
+      factory->NewStringFromAsciiChecked("foobar", AllocationType::kSharedOld);
+  CHECK(shared_string->InSharedWritableHeap());
+  v8::Local<v8::String> lh_shared_string =
+      Utils::Convert<String, v8::String>(shared_string);
+  v8::Global<v8::String> gh_shared_string(test.main_isolate(),
+                                          lh_shared_string);
+  gh_shared_string.SetWeak();
+
+  CcTest::CollectGarbage(OLD_SPACE, i_isolate);
+
+  CHECK(!gh_shared_string.IsEmpty());
+}
+
+class WakeupTask : public CancelableTask {
+ public:
+  explicit WakeupTask(Isolate* isolate) : CancelableTask(isolate) {}
+
+ private:
+  // v8::internal::CancelableTask overrides.
+  void RunInternal() override {}
+};
+
+class WorkerIsolateThread : public v8::base::Thread {
+ public:
+  WorkerIsolateThread(const char* name, MultiClientIsolateTest* test,
+                      std::atomic<bool>* done)
+      : v8::base::Thread(base::Thread::Options(name)),
+        test_(test),
+        done_(done) {}
+
+  void Run() override {
+    v8::Isolate* client = test_->NewClientIsolate();
+    Isolate* i_client = reinterpret_cast<Isolate*>(client);
+    Factory* factory = i_client->factory();
+
+    v8::Global<v8::String> gh_shared_string;
+
+    {
+      HandleScope handle_scope(i_client);
+      Handle<String> shared_string = factory->NewStringFromAsciiChecked(
+          "foobar", AllocationType::kSharedOld);
+      CHECK(shared_string->InSharedWritableHeap());
+      v8::Local<v8::String> lh_shared_string =
+          Utils::Convert<String, v8::String>(shared_string);
+      gh_shared_string.Reset(test_->main_isolate(), lh_shared_string);
+      gh_shared_string.SetWeak();
+    }
+
+    {
+      // Disable CSS for the shared heap and all clients.
+      DisableConservativeStackScanningScopeForTesting no_stack_scanning(
+          i_client->shared_heap_isolate()->heap());
+      i_client->heap()->CollectGarbageShared(i_client->main_thread_local_heap(),
+                                             GarbageCollectionReason::kTesting);
+    }
+
+    CHECK(gh_shared_string.IsEmpty());
+    client->Dispose();
+
+    *done_ = true;
+
+    V8::GetCurrentPlatform()
+        ->GetForegroundTaskRunner(test_->main_isolate())
+        ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+  }
+
+ private:
+  MultiClientIsolateTest* test_;
+  std::atomic<bool>* done_;
+};
+
+UNINITIALIZED_TEST(SharedStringInClientGlobalHandle) {
+  if (!V8_CAN_CREATE_SHARED_HEAP_BOOL) return;
+
+  v8_flags.shared_string_table = true;
+
+  MultiClientIsolateTest test;
+  std::atomic<bool> done = false;
+  WorkerIsolateThread thread("worker", &test, &done);
+  CHECK(thread.Start());
+
+  while (!done) {
+    v8::platform::PumpMessageLoop(
+        i::V8::GetCurrentPlatform(), test.main_isolate(),
+        v8::platform::MessageLoopBehavior::kWaitForWork);
+  }
+
+  thread.Join();
 }
 
 }  // namespace test_shared_strings

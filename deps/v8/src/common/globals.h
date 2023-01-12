@@ -122,6 +122,12 @@ namespace internal {
 #define V8_CAN_CREATE_SHARED_HEAP_BOOL false
 #endif
 
+#if defined(V8_STATIC_ROOTS)
+#define V8_STATIC_ROOTS_BOOL true
+#else
+#define V8_STATIC_ROOTS_BOOL false
+#endif
+
 #ifdef V8_ENABLE_SANDBOX
 #define V8_ENABLE_SANDBOX_BOOL true
 #else
@@ -380,9 +386,26 @@ constexpr int kMaxDoubleStringLength = 24;
 
 // Total wasm code space per engine (i.e. per process) is limited to make
 // certain attacks that rely on heap spraying harder.
+// Do not access directly, but via the {--wasm-max-committed-code-mb} flag.
 // Just below 4GB, such that {kMaxWasmCodeMemory} fits in a 32-bit size_t.
-constexpr size_t kMaxWasmCodeMB = 4095;
-constexpr size_t kMaxWasmCodeMemory = kMaxWasmCodeMB * MB;
+constexpr uint32_t kMaxCommittedWasmCodeMB = 4095;
+
+// The actual maximum code space size used can be configured with
+// --max-wasm-code-space-size. This constant is the default value, and at the
+// same time the maximum allowed value (checked by the WasmCodeManager).
+#if V8_TARGET_ARCH_ARM64
+// ARM64 only supports direct calls within a 128 MB range.
+constexpr uint32_t kDefaultMaxWasmCodeSpaceSizeMb = 128;
+#elif V8_TARGET_ARCH_PPC64
+// Branches only take 26 bits.
+constexpr uint32_t kDefaultMaxWasmCodeSpaceSizeMb = 32;
+#else
+// Use 1024 MB limit for code spaces on other platforms. This is smaller than
+// the total allowed code space (kMaxWasmCodeMemory) to avoid unnecessarily
+// big reservations, and to ensure that distances within a code space fit
+// within a 32-bit signed integer.
+constexpr uint32_t kDefaultMaxWasmCodeSpaceSizeMb = 1024;
+#endif
 
 #if V8_HOST_ARCH_64_BIT
 constexpr int kSystemPointerSizeLog2 = 3;
@@ -652,8 +675,11 @@ enum class StoreOrigin { kMaybeKeyed, kNamed };
 
 enum class TypeofMode { kInside, kNotInside };
 
-// Enums used by CEntry.
+// Whether floating point registers should be saved (and restored).
 enum class SaveFPRegsMode { kIgnore, kSave };
+
+// Whether arguments are passed on a known stack location or through a
+// register.
 enum class ArgvMode { kStack, kRegister };
 
 // This constant is used as an undefined value when passing source positions.
@@ -903,6 +929,7 @@ class CompressedMaybeObjectSlot;
 class CompressedMapWordSlot;
 class CompressedHeapObjectSlot;
 class V8HeapCompressionScheme;
+class ExternalCodeCompressionScheme;
 template <typename CompressionScheme>
 class OffHeapCompressedObjectSlot;
 class FullObjectSlot;
@@ -934,7 +961,12 @@ struct SlotTraits {
   using THeapObjectSlot = CompressedHeapObjectSlot;
   using TOffHeapObjectSlot =
       OffHeapCompressedObjectSlot<V8HeapCompressionScheme>;
-  using TCodeObjectSlot = OffHeapCompressedObjectSlot<V8HeapCompressionScheme>;
+#ifdef V8_EXTERNAL_CODE_SPACE
+  using TCodeObjectSlot =
+      OffHeapCompressedObjectSlot<ExternalCodeCompressionScheme>;
+#else
+  using TCodeObjectSlot = TObjectSlot;
+#endif  // V8_EXTERNAL_CODE_SPACE
 #else
   using TObjectSlot = FullObjectSlot;
   using TMaybeObjectSlot = FullMaybeObjectSlot;
@@ -1166,6 +1198,15 @@ enum ParseRestriction : bool {
   ONLY_SINGLE_FUNCTION_LITERAL  // Only a single FunctionLiteral expression.
 };
 
+enum class ScriptEventType {
+  kReserveId,
+  kCreate,
+  kDeserialize,
+  kBackgroundCompile,
+  kStreamingCompileBackground,
+  kStreamingCompileForeground
+};
+
 // State for inline cache call sites. Aliased as IC::State.
 enum class InlineCacheState {
   // No feedback will be collected.
@@ -1376,14 +1417,15 @@ inline std::ostream& operator<<(std::ostream& os, CreateArgumentsType type) {
 constexpr int kScopeInfoMaxInlinedLocalNamesSize = 75;
 
 enum ScopeType : uint8_t {
-  CLASS_SCOPE,     // The scope introduced by a class.
-  EVAL_SCOPE,      // The top-level scope for an eval source.
-  FUNCTION_SCOPE,  // The top-level scope for a function.
-  MODULE_SCOPE,    // The scope introduced by a module literal
-  SCRIPT_SCOPE,    // The top-level scope for a script or a top-level eval.
-  CATCH_SCOPE,     // The scope introduced by catch.
-  BLOCK_SCOPE,     // The scope introduced by a new block.
-  WITH_SCOPE       // The scope introduced by with.
+  CLASS_SCOPE,        // The scope introduced by a class.
+  EVAL_SCOPE,         // The top-level scope for an eval source.
+  FUNCTION_SCOPE,     // The top-level scope for a function.
+  MODULE_SCOPE,       // The scope introduced by a module literal
+  SCRIPT_SCOPE,       // The top-level scope for a script or a top-level eval.
+  CATCH_SCOPE,        // The scope introduced by catch.
+  BLOCK_SCOPE,        // The scope introduced by a new block.
+  WITH_SCOPE,         // The scope introduced by with.
+  SHADOW_REALM_SCOPE  // Synthetic scope for ShadowRealm NativeContexts.
 };
 
 inline std::ostream& operator<<(std::ostream& os, ScopeType type) {
@@ -1404,6 +1446,8 @@ inline std::ostream& operator<<(std::ostream& os, ScopeType type) {
       return os << "CLASS_SCOPE";
     case ScopeType::WITH_SCOPE:
       return os << "WITH_SCOPE";
+    case ScopeType::SHADOW_REALM_SCOPE:
+      return os << "SHADOW_REALM_SCOPE";
   }
   UNREACHABLE();
 }
@@ -1699,9 +1743,10 @@ class CompareOperationFeedback {
     kInternalizedStringFlag = 1 << 4,
     kOtherStringFlag = 1 << 5,
     kSymbolFlag = 1 << 6,
-    kBigIntFlag = 1 << 7,
-    kReceiverFlag = 1 << 8,
-    kAnyMask = 0x1FF,
+    kBigInt64Flag = 1 << 7,
+    kOtherBigIntFlag = 1 << 8,
+    kReceiverFlag = 1 << 9,
+    kAnyMask = 0x3FF,
   };
 
  public:
@@ -1723,7 +1768,8 @@ class CompareOperationFeedback {
     kReceiver = kReceiverFlag,
     kReceiverOrNullOrUndefined = kReceiver | kNullOrUndefined,
 
-    kBigInt = kBigIntFlag,
+    kBigInt64 = kBigInt64Flag,
+    kBigInt = kBigInt64Flag | kOtherBigIntFlag,
     kSymbol = kSymbolFlag,
 
     kAny = kAnyMask,
@@ -1852,6 +1898,12 @@ enum class TieringState : int32_t {
 #undef V
       kLastTieringState = kRequestTurbofan_Concurrent,
 };
+
+// The state kInProgress (= an optimization request for this function is
+// currently being serviced) currently means that no other tiering action can
+// happen. Define this constant so we can static_assert it at related code
+// sites.
+static constexpr bool kTieringStateInProgressBlocksTierup = true;
 
 // To efficiently check whether a marker is kNone or kInProgress using a single
 // mask, we expect the kNone to be 0 and kInProgress to be 1 so that we can
@@ -2038,6 +2090,11 @@ inline constexpr int JSParameterCount(int param_count_without_receiver) {
   return param_count_without_receiver + kJSArgcReceiverSlots;
 }
 
+// A special {Parameter} index for JSCalls that represents the closure.
+// The constant is defined here for accessibility (without having to include TF
+// internals), even though it is mostly relevant to Turbofan.
+constexpr int kJSCallClosureParameterIndex = -1;
+
 // Opaque data type for identifying stack frames. Used extensively
 // by the debugger.
 // ID_MIN_VALUE and ID_MAX_VALUE are specified to ensure that enumeration type
@@ -2065,7 +2122,7 @@ class PtrComprCageBase {
   // NOLINTNEXTLINE
   inline PtrComprCageBase(const LocalIsolate* isolate);
 
-  inline Address address() const;
+  inline Address address() const { return address_; }
 
   bool operator==(const PtrComprCageBase& other) const {
     return address_ == other.address_;

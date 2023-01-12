@@ -82,8 +82,6 @@ Handle<CodeDataContainer> FactoryBase<Impl>::NewCodeDataContainer(
   CodeDataContainer data_container = CodeDataContainer::cast(
       AllocateRawWithImmortalMap(size, allocation, map));
   DisallowGarbageCollection no_gc;
-  data_container.set_next_code_link(read_only_roots().undefined_value(),
-                                    SKIP_WRITE_BARRIER);
   data_container.set_kind_specific_flags(flags, kRelaxedStore);
   if (V8_EXTERNAL_CODE_SPACE_BOOL) {
     Isolate* isolate_for_sandbox = impl()->isolate_for_sandbox();
@@ -259,14 +257,16 @@ Handle<BytecodeArray> FactoryBase<Impl>::NewBytecodeArray(
 }
 
 template <typename Impl>
-Handle<Script> FactoryBase<Impl>::NewScript(
-    Handle<PrimitiveHeapObject> source) {
-  return NewScriptWithId(source, isolate()->GetNextScriptId());
+Handle<Script> FactoryBase<Impl>::NewScript(Handle<PrimitiveHeapObject> source,
+                                            ScriptEventType script_event_type) {
+  return NewScriptWithId(source, isolate()->GetNextScriptId(),
+                         script_event_type);
 }
 
 template <typename Impl>
 Handle<Script> FactoryBase<Impl>::NewScriptWithId(
-    Handle<PrimitiveHeapObject> source, int script_id) {
+    Handle<PrimitiveHeapObject> source, int script_id,
+    ScriptEventType script_event_type) {
   DCHECK(source->IsString() || source->IsUndefined());
   // Create and initialize script object.
   ReadOnlyRoots roots = read_only_roots();
@@ -300,8 +300,7 @@ Handle<Script> FactoryBase<Impl>::NewScriptWithId(
     impl()->AddToScriptList(script);
   }
 
-  LOG(isolate(),
-      ScriptEvent(V8FileLogger::ScriptEventType::kCreate, script_id));
+  LOG(isolate(), ScriptEvent(script_event_type, script_id));
   return script;
 }
 
@@ -675,6 +674,7 @@ MaybeHandle<SeqStringT> FactoryBase<Impl>::NewRawStringWithMap(
   SeqStringT string =
       SeqStringT::cast(AllocateRawWithImmortalMap(size, allocation, map));
   DisallowGarbageCollection no_gc;
+  string.clear_padding_destructively(length);
   string.set_length(length);
   string.set_raw_hash_field(String::kEmptyHashField);
   DCHECK_EQ(size, string.Size());
@@ -763,14 +763,14 @@ MaybeHandle<String> FactoryBase<Impl>::NewConsString(
       uint8_t* dest = result->GetChars(no_gc, access_guard);
       // Copy left part.
       {
-        const uint8_t* src =
-            left->template GetChars<uint8_t>(isolate(), no_gc, access_guard);
+        const uint8_t* src = left->template GetDirectStringChars<uint8_t>(
+            isolate(), no_gc, access_guard);
         CopyChars(dest, src, left_length);
       }
       // Copy right part.
       {
-        const uint8_t* src =
-            right->template GetChars<uint8_t>(isolate(), no_gc, access_guard);
+        const uint8_t* src = right->template GetDirectStringChars<uint8_t>(
+            isolate(), no_gc, access_guard);
         CopyChars(dest + left_length, src, right_length);
       }
       return result;
@@ -1055,6 +1055,7 @@ FactoryBase<Impl>::AllocateRawOneByteInternalizedString(
       map);
   SeqOneByteString answer = SeqOneByteString::cast(result);
   DisallowGarbageCollection no_gc;
+  answer.clear_padding_destructively(length);
   answer.set_length(length);
   answer.set_raw_hash_field(raw_hash_field);
   DCHECK_EQ(size, answer.Size());
@@ -1076,6 +1077,7 @@ FactoryBase<Impl>::AllocateRawTwoByteInternalizedString(
                                                          map),
       map));
   DisallowGarbageCollection no_gc;
+  answer.clear_padding_destructively(length);
   answer.set_length(length);
   answer.set_raw_hash_field(raw_hash_field);
   DCHECK_EQ(size, answer.Size());

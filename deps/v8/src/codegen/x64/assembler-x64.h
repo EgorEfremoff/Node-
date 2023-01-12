@@ -63,7 +63,7 @@ class MaglevSafepointTableBuilder;
 
 // Utility functions
 
-enum Condition {
+enum Condition : uint8_t {
   overflow = 0,
   no_overflow = 1,
   below = 2,
@@ -161,11 +161,23 @@ enum ScaleFactor : int8_t {
 class V8_EXPORT_PRIVATE Operand {
  public:
   struct Data {
-    byte rex = 0;
-    byte buf[9] = {0};
-    byte len = 1;       // number of bytes of buf_ in use.
-    int8_t addend = 0;  // for rip + offset + addend.
+    union {
+      // {label} is set if {is_label_operand} is true.
+      Label* label;
+
+      // Buffer for encoded memory operand:
+      // Register (1 byte) + SIB (0 or 1 byte) + displacement (0, 1, or 4 byte).
+      byte buf[6] = {0};
+    };
+
+    byte len = 1;  // Number of bytes of buf in use.
+    bool is_label_operand = false;
+    byte rex = 0;       // Rex prefix, only for memory operands.
+    int8_t addend = 0;  // For label-relative operand: rip + offset + addend.
   };
+  // {Data::len} is 8-byte aligned, which makes it fast to access.
+  static_assert(offsetof(Data, len) % kSystemPointerSize == 0);
+  static_assert(sizeof(Data) == 2 * kSystemPointerSize);
 
   // [base + disp/r]
   V8_INLINE constexpr Operand(Register base, int32_t disp) {
@@ -221,8 +233,8 @@ class V8_EXPORT_PRIVATE Operand {
     data_.addend = addend;
     DCHECK_NOT_NULL(label);
     DCHECK(addend == 0 || (is_int8(addend) && label->is_bound()));
-    set_modrm(0, rbp);
-    set_disp64(reinterpret_cast<intptr_t>(label));
+    data_.is_label_operand = true;
+    data_.label = label;
   }
 
   Operand(const Operand&) V8_NOEXCEPT = default;
@@ -266,13 +278,6 @@ class V8_EXPORT_PRIVATE Operand {
     Address p = reinterpret_cast<Address>(&data_.buf[data_.len]);
     WriteUnalignedValue(p, disp);
     data_.len += sizeof(int32_t);
-  }
-
-  V8_INLINE void set_disp64(int64_t disp) {
-    DCHECK_EQ(1, data_.len);
-    Address p = reinterpret_cast<Address>(&data_.buf[data_.len]);
-    WriteUnalignedValue(p, disp);
-    data_.len += sizeof(disp);
   }
 
   Data data_;
@@ -379,8 +384,7 @@ class ConstPool {
   Assembler* assm_;
 
   // Values, pc offsets of entries.
-  using EntryMap = std::multimap<uint64_t, int>;
-  EntryMap entries_;
+  std::multimap<uint64_t, int> entries_;
 
   // Number of bytes taken up by the displacement of rip-relative addressing.
   static constexpr int kRipRelativeDispSize = 4;  // 32-bit displacement.
@@ -2088,12 +2092,12 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // Check if there is less than kGap bytes available in the buffer.
   // If this is the case, we need to grow the buffer before emitting
   // an instruction or relocation information.
-  inline bool buffer_overflow() const {
-    return pc_ >= reloc_info_writer.pos() - kGap;
-  }
+  bool buffer_overflow() const { return available_space() < kGap; }
 
   // Get the number of bytes available in the buffer.
-  inline int available_space() const {
+  int available_space() const {
+    DCHECK_GE(reloc_info_writer.pos(), pc_);
+    DCHECK_GE(kMaxInt, reloc_info_writer.pos() - pc_);
     return static_cast<int>(reloc_info_writer.pos() - pc_);
   }
 
@@ -2126,15 +2130,29 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
     WriteUnalignedValue(addr_at(pos), x);
   }
 
-  // code emission
-  void GrowBuffer();
+  // Code emission.
+  V8_NOINLINE V8_PRESERVE_MOST void GrowBuffer();
 
-  void emit(byte x) { *pc_++ = x; }
-  inline void emitl(uint32_t x);
-  inline void emitq(uint64_t x);
-  inline void emitw(uint16_t x);
-  inline void emit(Immediate x);
-  inline void emit(Immediate64 x);
+  template <typename T>
+  static uint8_t* emit(uint8_t* __restrict pc, T t) {
+    WriteUnalignedValue(reinterpret_cast<Address>(pc), t);
+    return pc + sizeof(T);
+  }
+
+  void emit(uint8_t x) { pc_ = emit(pc_, x); }
+  void emitw(uint16_t x) { pc_ = emit(pc_, x); }
+  void emitl(uint32_t x) { pc_ = emit(pc_, x); }
+  void emitq(uint64_t x) { pc_ = emit(pc_, x); }
+
+  void emit(Immediate x) {
+    if (!RelocInfo::IsNoInfo(x.rmode_)) RecordRelocInfo(x.rmode_);
+    emitl(x.value_);
+  }
+
+  void emit(Immediate64 x) {
+    if (!RelocInfo::IsNoInfo(x.rmode_)) RecordRelocInfo(x.rmode_);
+    emitq(static_cast<uint64_t>(x.value_));
+  }
 
   // Emits a REX prefix that encodes a 64-bit operand size and
   // the top bit of both register codes.
@@ -2287,9 +2305,13 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   }
 
   // Emit the ModR/M byte, and optionally the SIB byte and
-  // 1- or 4-byte offset for a memory operand.  Also used to encode
-  // a three-bit opcode extension into the ModR/M byte.
+  // 1- or 4-byte offset for a memory operand.
+  // Also used to encode a three-bit opcode extension into the ModR/M byte.
   void emit_operand(int rm, Operand adr);
+
+  // Emit a RIP-relative operand.
+  // Also used to encode a three-bit opcode extension into the ModR/M byte.
+  V8_NOINLINE void emit_label_operand(int rm, Label* label, int addend = 0);
 
   // Emit a ModR/M byte with registers coded in the reg and rm_reg fields.
   void emit_modrm(Register reg, Register rm_reg) {

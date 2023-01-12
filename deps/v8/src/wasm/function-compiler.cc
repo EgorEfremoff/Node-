@@ -14,7 +14,6 @@
 #include "src/wasm/baseline/liftoff-compiler.h"
 #include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-debug.h"
-#include "src/wasm/wasm-engine.h"
 
 namespace v8::internal::wasm {
 
@@ -80,6 +79,24 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
     wasm_compile_function_time_scope.emplace(timed_histogram);
   }
 
+  // Before executing compilation, make sure that the function was validated.
+  // Both Liftoff and TurboFan compilation do not perform validation, so can
+  // only run on valid functions.
+  if (V8_UNLIKELY(!env->module->function_was_validated(func_index_))) {
+    // This code path can only be reached in
+    // - eager compilation mode,
+    // - with lazy validation,
+    // - with PGO (which compiles some functions eagerly), or
+    // - with compilation hints (which also compiles some functions eagerly).
+    // TODO(clemensb): Add a proper check.
+    if (ValidateFunctionBody(env->enabled_features, env->module, detected,
+                             func_body)
+            .failed()) {
+      return {};
+    }
+    env->module->set_function_validated(func_index_);
+  }
+
   if (v8_flags.trace_wasm_compiler) {
     PrintF("Compiling wasm function %d with %s\n", func_index_,
            ExecutionTierToString(tier_));
@@ -130,17 +147,6 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
       V8_FALLTHROUGH;
 
     case ExecutionTier::kTurbofan:
-      // Before executing TurboFan compilation, make sure that the function was
-      // validated (because TurboFan compilation assumes valid input).
-      if (V8_UNLIKELY(!env->module->function_was_validated(func_index_))) {
-        AccountingAllocator allocator;
-        if (ValidateFunctionBody(&allocator, env->enabled_features, env->module,
-                                 detected, func_body)
-                .failed()) {
-          return {};
-        }
-        env->module->set_function_validated(func_index_);
-      }
       result = compiler::ExecuteTurbofanWasmCompilation(
           env, wire_bytes_storage, func_body, func_index_, counters,
           buffer_cache, detected);
@@ -152,7 +158,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
 }
 
 // static
-void WasmCompilationUnit::CompileWasmFunction(Isolate* isolate,
+void WasmCompilationUnit::CompileWasmFunction(Counters* counters,
                                               NativeModule* native_module,
                                               WasmFeatures* detected,
                                               const WasmFunction* function,
@@ -164,11 +170,11 @@ void WasmCompilationUnit::CompileWasmFunction(Isolate* isolate,
 
   DCHECK_LE(native_module->num_imported_functions(), function->func_index);
   DCHECK_LT(function->func_index, native_module->num_functions());
-  WasmCompilationUnit unit(function->func_index, tier, kNoDebugging);
+  WasmCompilationUnit unit(function->func_index, tier, kNotForDebugging);
   CompilationEnv env = native_module->CreateCompilationEnv();
   WasmCompilationResult result = unit.ExecuteCompilation(
       &env, native_module->compilation_state()->GetWireBytesStorage().get(),
-      isolate->counters(), nullptr, detected);
+      counters, nullptr, detected);
   if (result.succeeded()) {
     WasmCodeRefScope code_ref_scope;
     native_module->PublishCode(

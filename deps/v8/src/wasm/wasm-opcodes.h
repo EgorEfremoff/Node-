@@ -62,7 +62,6 @@ bool V8_EXPORT_PRIVATE IsJSCompatibleSignature(const FunctionSig* sig,
   V(ReturnCallIndirect, 0x13, _, "return_call_indirect")                     \
   V(CallRef, 0x14, _, "call_ref")              /* typed_funcref prototype */ \
   V(ReturnCallRef, 0x15, _, "return_call_ref") /* typed_funcref prototype */ \
-  V(CallRefDeprecated, 0x17, _, "call_ref")    /* temporary, for compat.*/   \
   V(Drop, 0x1a, _, "drop")                                                   \
   V(Select, 0x1b, _, "select")                                               \
   V(SelectWithType, 0x1c, _, "select")                                       \
@@ -695,7 +694,6 @@ bool V8_EXPORT_PRIVATE IsJSCompatibleSignature(const FunctionSig* sig,
   V(ArrayGetS, 0xfb14, _, "array.get_s")                                       \
   V(ArrayGetU, 0xfb15, _, "array.get_u")                                       \
   V(ArraySet, 0xfb16, _, "array.set")                                          \
-  V(ArrayLenDeprecated, 0xfb17, _, "array.len")                                \
   V(ArrayCopy, 0xfb18, _,                                                      \
     "array.copy") /* not standardized - V8 experimental */                     \
   V(ArrayLen, 0xfb19, _, "array.len")                                          \
@@ -713,8 +711,12 @@ bool V8_EXPORT_PRIVATE IsJSCompatibleSignature(const FunctionSig* sig,
   V(RefCast, 0xfb41, _, "ref.cast")                                            \
   V(RefCastNull, 0xfb49, _, "ref.cast null")                                   \
   V(RefCastDeprecated, 0xfb45, _, "ref.cast")                                  \
-  V(BrOnCast, 0xfb46, _, "br_on_cast")                                         \
-  V(BrOnCastFail, 0xfb47, _, "br_on_cast_fail")                                \
+  V(BrOnCast, 0xfb42, _, "br_on_cast")                                         \
+  V(BrOnCastNull, 0xfb4a, _, "br_on_cast null")                                \
+  V(BrOnCastDeprecated, 0xfb46, _, "br_on_cast")                               \
+  V(BrOnCastFail, 0xfb43, _, "br_on_cast_fail")                                \
+  V(BrOnCastFailNull, 0xfb4b, _, "br_on_cast_fail null")                       \
+  V(BrOnCastFailDeprecated, 0xfb47, _, "br_on_cast_fail")                      \
   V(RefCastNop, 0xfb4c, _, "ref.cast_nop")                                     \
   V(RefIsStruct, 0xfb51, _, "ref.is_struct")                                   \
   V(RefIsI31, 0xfb52, _, "ref.is_i31")                                         \

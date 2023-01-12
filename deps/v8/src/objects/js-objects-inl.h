@@ -100,12 +100,6 @@ MaybeHandle<HeapObject> JSReceiver::GetPrototype(Isolate* isolate,
   // We don't expect access checks to be needed on JSProxy objects.
   DCHECK(!receiver->IsAccessCheckNeeded() || receiver->IsJSObject());
 
-  if (receiver->IsWasmObject()) {
-    THROW_NEW_ERROR(isolate,
-                    NewTypeError(MessageTemplate::kWasmObjectsAreOpaque),
-                    HeapObject);
-  }
-
   PrototypeIterator iter(isolate, receiver, kStartAtReceiver,
                          PrototypeIterator::END_AT_NON_HIDDEN);
   do {
@@ -432,10 +426,7 @@ void JSObject::RawFastInobjectPropertyAtPut(FieldIndex index, Object value,
   DCHECK(index.is_inobject());
   DCHECK(value.IsShared());
   SEQ_CST_WRITE_FIELD(*this, index.offset(), value);
-  // JSSharedStructs are allocated in the shared old space, which is currently
-  // collected by stopping the world, so the incremental write barrier is not
-  // needed. They can only store Smis and other HeapObjects in the shared old
-  // space, so the generational write barrier is also not needed.
+  CONDITIONAL_WRITE_BARRIER(*this, index.offset(), value, UPDATE_WRITE_BARRIER);
 }
 
 void JSObject::FastPropertyAtPut(FieldIndex index, Object value,

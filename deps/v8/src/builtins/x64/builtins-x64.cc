@@ -338,7 +338,14 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
 
   {
     NoRootArrayScope uninitialized_root_register(masm);
-    // Set up frame.
+
+    // Set up the frame.
+    //
+    // Note: at this point we are entering V8-generated code from C++ and thus
+    // rbp can be an arbitrary value (-fomit-frame-pointer). Since V8 still
+    // needs to know where the next interesting frame is for the purpose of
+    // stack walks, we instead push the stored EXIT frame fp
+    // (IsolateAddressId::kCEntryFPAddress) below to a dedicated slot.
     __ pushq(rbp);
     __ movq(rbp, rsp);
 
@@ -392,6 +399,16 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
   ExternalReference c_entry_fp = ExternalReference::Create(
       IsolateAddressId::kCEntryFPAddress, masm->isolate());
   {
+    // Keep this static_assert to preserve a link between the offset constant
+    // and the code location it refers to.
+#ifdef V8_TARGET_OS_WIN
+    static_assert(EntryFrameConstants::kNextExitFrameFPOffset ==
+                  -3 * kSystemPointerSize + -7 * kSystemPointerSize -
+                      EntryFrameConstants::kXMMRegistersBlockSize);
+#else
+    static_assert(EntryFrameConstants::kNextExitFrameFPOffset ==
+                  -3 * kSystemPointerSize + -5 * kSystemPointerSize);
+#endif  // V8_TARGET_OS_WIN
     Operand c_entry_fp_operand = masm->ExternalReferenceAsOperand(c_entry_fp);
     __ Push(c_entry_fp_operand);
 
@@ -4490,8 +4507,7 @@ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
-                               SaveFPRegsMode save_doubles, ArgvMode argv_mode,
-                               bool builtin_exit_frame) {
+                               ArgvMode argv_mode, bool builtin_exit_frame) {
   // rax: number of arguments including receiver
   // rbx: pointer to C function  (C callee-saved)
   // rbp: frame pointer of calling JS frame (restored after C call)
@@ -4530,15 +4546,14 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
       kArgExtraStackSpace +
       (result_size <= kMaxRegisterResultSize ? 0 : result_size);
   if (argv_mode == ArgvMode::kRegister) {
-    DCHECK(save_doubles == SaveFPRegsMode::kIgnore);
     DCHECK(!builtin_exit_frame);
     __ EnterApiExitFrame(arg_stack_space);
     // Move argc into r12 (argv is already in r15).
     __ movq(r12, rax);
   } else {
-    __ EnterExitFrame(
-        arg_stack_space, save_doubles == SaveFPRegsMode::kSave,
-        builtin_exit_frame ? StackFrame::BUILTIN_EXIT : StackFrame::EXIT);
+    __ EnterExitFrame(arg_stack_space, builtin_exit_frame
+                                           ? StackFrame::BUILTIN_EXIT
+                                           : StackFrame::EXIT);
   }
 
   // rbx: pointer to builtin function  (C callee-saved).
@@ -4601,8 +4616,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
   }
 
   // Exit the JavaScript to C++ exit frame.
-  __ LeaveExitFrame(save_doubles == SaveFPRegsMode::kSave,
-                    argv_mode == ArgvMode::kStack);
+  __ LeaveExitFrame(argv_mode == ArgvMode::kStack);
   __ ret(0);
 
   // Handling of exception.

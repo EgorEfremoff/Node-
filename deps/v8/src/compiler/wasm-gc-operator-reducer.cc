@@ -60,7 +60,7 @@ bool InDeadBranch(Node* node) {
 
 Node* GetAlias(Node* node) {
   switch (node->opcode()) {
-    case IrOpcode::kWasmTypeCheck:
+    case IrOpcode::kWasmTypeCast:
     case IrOpcode::kTypeGuard:
     case IrOpcode::kAssertNotNull:
       return NodeProperties::GetValueInput(node, 0);
@@ -202,9 +202,12 @@ Reduction WasmGCOperatorReducer::ReduceAssertNotNull(Node* node) {
 
   // Optimize the check away if the argument is known to be non-null.
   if (object_type.type.is_non_nullable()) {
-    ReplaceWithValue(node, object);
-    node->Kill();
-    return Replace(object);
+    // First, relax control.
+    ReplaceWithValue(node, node, node, control);
+    // Use a TypeGuard node to not lose any type information.
+    NodeProperties::ChangeOp(
+        node, common()->TypeGuard(NodeProperties::GetType(node)));
+    return Changed(node);
   }
 
   object_type.type = object_type.type.AsNonNull();
@@ -259,13 +262,20 @@ Reduction WasmGCOperatorReducer::ReduceWasmTypeCast(Node* node) {
                             wasm::HeapType(rtt_type.type.ref_index()),
                             object_type.module, rtt_type.module)) {
     if (to_nullable) {
-      // Type cast will always succeed. Remove it.
-      ReplaceWithValue(node, object);
-      node->Kill();
-      return Replace(object);
+      // Type cast will always succeed. Turn it into a TypeGuard to not lose any
+      // type information.
+      // First, relax control.
+      ReplaceWithValue(node, node, node, control);
+      // Remove rtt input.
+      node->RemoveInput(1);
+      NodeProperties::ChangeOp(
+          node, common()->TypeGuard(NodeProperties::GetType(node)));
+      return Changed(node);
     } else {
       gasm_.InitializeEffectControl(effect, control);
-      return Replace(gasm_.AssertNotNull(object));
+      return Replace(
+          SetType(gasm_.AssertNotNull(object, TrapId::kTrapIllegalCast),
+                  object_type.type.AsNonNull()));
     }
   }
 

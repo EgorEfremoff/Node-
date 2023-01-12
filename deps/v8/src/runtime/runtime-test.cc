@@ -265,7 +265,8 @@ bool CanOptimizeFunction(CodeKind target_kind, Handle<JSFunction> function,
     return CrashUnlessFuzzingReturnFalse(isolate);
   }
 
-  if (!v8_flags.turbofan) return false;
+  if (target_kind == CodeKind::TURBOFAN && !v8_flags.turbofan) return false;
+  if (target_kind == CodeKind::MAGLEV && !v8_flags.maglev) return false;
 
   if (function->shared().optimization_disabled() &&
       function->shared().disabled_optimization_reason() ==
@@ -554,10 +555,9 @@ void FinalizeOptimization(Isolate* isolate) {
 #endif  // V8_ENABLE_MAGLEV
 }
 
-BytecodeOffset OffsetOfNextJumpLoop(Isolate* isolate, UnoptimizedFrame* frame) {
-  Handle<BytecodeArray> bytecode_array(frame->GetBytecodeArray(), isolate);
-  const int current_offset = frame->GetBytecodeOffset();
-
+BytecodeOffset OffsetOfNextJumpLoop(Isolate* isolate,
+                                    Handle<BytecodeArray> bytecode_array,
+                                    int current_offset) {
   interpreter::BytecodeArrayIterator it(bytecode_array, current_offset);
 
   // First, look for a loop that contains the current bytecode offset.
@@ -624,14 +624,15 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
                                                               *function);
   }
 
-  if (function->HasAvailableOptimizedCode()) {
+  if (function->HasAvailableOptimizedCode() &&
+      !function->code().is_maglevved()) {
     DCHECK(function->HasAttachedOptimizedCode() ||
            function->ChecksTieringState());
     // If function is already optimized, return.
     return ReadOnlyRoots(isolate).undefined_value();
   }
 
-  if (!it.frame()->is_unoptimized()) {
+  if (!it.frame()->is_unoptimized() && !it.frame()->is_maglev()) {
     // Nothing to be done.
     return ReadOnlyRoots(isolate).undefined_value();
   }
@@ -652,8 +653,22 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
   // see the cached OSR code with a mismatched offset, and trigger
   // non-concurrent OSR compilation and installation.
   if (isolate->concurrent_recompilation_enabled() && v8_flags.concurrent_osr) {
-    const BytecodeOffset osr_offset =
-        OffsetOfNextJumpLoop(isolate, UnoptimizedFrame::cast(it.frame()));
+    BytecodeOffset osr_offset = BytecodeOffset::None();
+    if (it.frame()->is_unoptimized()) {
+      UnoptimizedFrame* frame = UnoptimizedFrame::cast(it.frame());
+      Handle<BytecodeArray> bytecode_array(frame->GetBytecodeArray(), isolate);
+      const int current_offset = frame->GetBytecodeOffset();
+      osr_offset =
+          OffsetOfNextJumpLoop(isolate, bytecode_array, current_offset);
+    } else {
+      MaglevFrame* frame = MaglevFrame::cast(it.frame());
+      Handle<BytecodeArray> bytecode_array(
+          frame->function().shared().GetBytecodeArray(isolate), isolate);
+      const int current_offset = frame->GetBytecodeOffsetForOSR().ToInt();
+      osr_offset =
+          OffsetOfNextJumpLoop(isolate, bytecode_array, current_offset);
+    }
+
     if (osr_offset.IsNone()) {
       // The loop may have been elided by bytecode generation (e.g. for
       // patterns such as `do { ... } while (false);`.
@@ -732,9 +747,9 @@ RUNTIME_FUNCTION(Runtime_GetOptimizationStatus) {
   DCHECK_EQ(args.length(), 1);
 
   int status = 0;
-  if (v8_flags.lite_mode || v8_flags.jitless) {
-    // Both jitless and lite modes cannot optimize. Unit tests should handle
-    // these the same way. In the future, the two flags may become synonyms.
+  if (v8_flags.lite_mode || v8_flags.jitless || !V8_ENABLE_TURBOFAN_BOOL) {
+    // These modes cannot optimize. Unit tests should handle these the same
+    // way.
     status |= static_cast<int>(OptimizationStatus::kLiteMode);
   }
   if (!isolate->use_optimizer()) {
@@ -816,6 +831,8 @@ RUNTIME_FUNCTION(Runtime_GetOptimizationStatus) {
           static_cast<int>(OptimizationStatus::kTopmostFrameIsInterpreted);
     } else if (frame->is_baseline()) {
       status |= static_cast<int>(OptimizationStatus::kTopmostFrameIsBaseline);
+    } else if (frame->is_maglev()) {
+      status |= static_cast<int>(OptimizationStatus::kTopmostFrameIsMaglev);
     }
   }
 
@@ -1195,6 +1212,7 @@ RUNTIME_FUNCTION(Runtime_GlobalPrint) {
     uint16_t character = stream.GetNext();
     PrintF(output_stream, "%c", character);
   }
+  fflush(output_stream);
   return string;
 }
 
@@ -1365,11 +1383,11 @@ RUNTIME_FUNCTION(Runtime_PretenureAllocationSite) {
     return ReturnFuzzSafe(ReadOnlyRoots(isolate).false_value(), isolate);
   }
 
-  PretenturingHandler* pretenuring_handler = heap->pretenuring_handler();
+  PretenuringHandler* pretenuring_handler = heap->pretenuring_handler();
   AllocationMemento memento =
       pretenuring_handler
-          ->FindAllocationMemento<PretenturingHandler::kForRuntime>(
-              object.map(), object);
+          ->FindAllocationMemento<PretenuringHandler::kForRuntime>(object.map(),
+                                                                   object);
   if (memento.is_null())
     return ReturnFuzzSafe(ReadOnlyRoots(isolate).false_value(), isolate);
   AllocationSite site = memento.GetAllocationSite();

@@ -76,6 +76,7 @@ class V8_EXPORT_PRIVATE TurboAssembler
 
   // Operations on roots in the root-array.
   Operand RootAsOperand(RootIndex index);
+  void LoadTaggedRoot(Register destination, RootIndex index);
   void LoadRoot(Register destination, RootIndex index) final;
   void LoadRoot(Operand destination, RootIndex index) {
     LoadRoot(kScratchRegister, index);
@@ -116,7 +117,7 @@ class V8_EXPORT_PRIVATE TurboAssembler
 
   // Calculate the number of stack slots to reserve for arguments when calling a
   // C function.
-  int ArgumentStackSlotsForCFunctionCall(int num_arguments);
+  static int ArgumentStackSlotsForCFunctionCall(int num_arguments);
 
   void CheckPageFlag(Register object, Register scratch, int mask, Condition cc,
                      Label* condition_met,
@@ -204,6 +205,10 @@ class V8_EXPORT_PRIVATE TurboAssembler
   void Cmp(Operand dst, Smi src);
   void Cmp(Register dst, int32_t src);
 
+  void CmpTagged(const Register& src1, const Register& src2) {
+    cmp_tagged(src1, src2);
+  }
+
   // ---------------------------------------------------------------------------
   // Conversions between tagged smi values and non-tagged integer values.
 
@@ -278,6 +283,8 @@ class V8_EXPORT_PRIVATE TurboAssembler
     j(less, dest);
   }
 
+  // Caution: if {reg} is a 32-bit negative int, it should be sign-extended to
+  // 64-bit before calling this function.
   void Switch(Register scrach, Register reg, int case_base_value,
               Label** labels, int num_labels);
 
@@ -622,6 +629,7 @@ class V8_EXPORT_PRIVATE TurboAssembler
   void DecompressTaggedSigned(Register destination, Operand field_operand);
   void DecompressTaggedPointer(Register destination, Operand field_operand);
   void DecompressTaggedPointer(Register destination, Register source);
+  void DecompressTaggedPointer(Register destination, Tagged_t immediate);
   void DecompressAnyTagged(Register destination, Operand field_operand);
 
   // ---------------------------------------------------------------------------
@@ -733,8 +741,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   //
   // Allocates arg_stack_space * kSystemPointerSize memory (not GCed) on the
   // stack accessible via StackSpaceOperand.
-  void EnterExitFrame(int arg_stack_space = 0, bool save_doubles = false,
-                      StackFrame::Type frame_type = StackFrame::EXIT);
+  void EnterExitFrame(int arg_stack_space, StackFrame::Type frame_type);
 
   // Enter specific kind of exit frame. Allocates
   // (arg_stack_space * kSystemPointerSize) memory (not GCed) on the stack
@@ -744,7 +751,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   // Leave the current exit frame. Expects/provides the return value in
   // register rax:rdx (untouched) and the pointer to the first
   // argument in register rsi (if pop_arguments == true).
-  void LeaveExitFrame(bool save_doubles = false, bool pop_arguments = true);
+  void LeaveExitFrame(bool pop_arguments);
 
   // Leave the current exit frame. Expects/provides the return value in
   // register rax (untouched).
@@ -896,20 +903,17 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   // Runtime calls
 
   // Call a runtime routine.
-  void CallRuntime(const Runtime::Function* f, int num_arguments,
-                   SaveFPRegsMode save_doubles = SaveFPRegsMode::kIgnore);
+  void CallRuntime(const Runtime::Function* f, int num_arguments);
 
   // Convenience function: Same as above, but takes the fid instead.
-  void CallRuntime(Runtime::FunctionId fid,
-                   SaveFPRegsMode save_doubles = SaveFPRegsMode::kIgnore) {
+  void CallRuntime(Runtime::FunctionId fid) {
     const Runtime::Function* function = Runtime::FunctionForId(fid);
-    CallRuntime(function, function->nargs, save_doubles);
+    CallRuntime(function, function->nargs);
   }
 
   // Convenience function: Same as above, but takes the fid instead.
-  void CallRuntime(Runtime::FunctionId fid, int num_arguments,
-                   SaveFPRegsMode save_doubles = SaveFPRegsMode::kIgnore) {
-    CallRuntime(Runtime::FunctionForId(fid), num_arguments, save_doubles);
+  void CallRuntime(Runtime::FunctionId fid, int num_arguments) {
+    CallRuntime(Runtime::FunctionForId(fid), num_arguments);
   }
 
   // Convenience function: tail call a runtime routine (jump)
@@ -953,7 +957,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
 
   // Allocates arg_stack_space * kSystemPointerSize memory (not GCed) on the
   // stack accessible via StackSpaceOperand.
-  void EnterExitFrameEpilogue(int arg_stack_space, bool save_doubles);
+  void EnterExitFrameEpilogue(int arg_stack_space);
 
   void LeaveExitFrameEpilogue();
 
@@ -966,6 +970,11 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
 // Generate an Operand for loading a field from an object.
 inline Operand FieldOperand(Register object, int offset) {
   return Operand(object, offset - kHeapObjectTag);
+}
+
+// For compatibility with platform-independent code.
+inline MemOperand FieldMemOperand(Register object, int offset) {
+  return MemOperand(object, offset - kHeapObjectTag);
 }
 
 // Generate an Operand for loading a field from an object. Object pointer is a

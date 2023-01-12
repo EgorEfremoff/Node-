@@ -96,10 +96,10 @@ static_assert(sizeof(OptimizationDecision) <= kInt32Size);
 
 namespace {
 
-void TraceInOptimizationQueue(JSFunction function) {
+void TraceInOptimizationQueue(JSFunction function, CodeKind calling_code_kind) {
   if (v8_flags.trace_opt_verbose) {
-    PrintF("[not marking function %s for optimization: already queued]\n",
-           function.DebugNameCStr().get());
+    PrintF("[not marking function %s (%s) for optimization: already queued]\n",
+           function.DebugNameCStr().get(), CodeKindToString(calling_code_kind));
   }
 }
 
@@ -277,11 +277,13 @@ void TieringManager::MaybeOptimizeFrame(JSFunction function,
   const TieringState tiering_state = function.feedback_vector().tiering_state();
   const TieringState osr_tiering_state =
       function.feedback_vector().osr_tiering_state();
+  // Attenzione! Update this constant in case the condition below changes.
+  static_assert(kTieringStateInProgressBlocksTierup);
   if (V8_UNLIKELY(IsInProgress(tiering_state)) ||
       V8_UNLIKELY(IsInProgress(osr_tiering_state))) {
-    // Note: This effectively disables OSR for the function while it is being
-    // compiled.
-    TraceInOptimizationQueue(function);
+    // Note: This effectively disables further tiering actions (e.g. OSR, or
+    // tiering up into Maglev) for the function while it is being compiled.
+    TraceInOptimizationQueue(function, calling_code_kind);
     return;
   }
 

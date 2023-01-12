@@ -441,6 +441,14 @@ RUNTIME_FUNCTION(Runtime_VerifyType) {
   return *obj;
 }
 
+RUNTIME_FUNCTION(Runtime_CheckTurboshaftTypeOf) {
+  // %CheckTurboshaftTypeOf has no effect in the interpreter.
+  HandleScope scope(isolate);
+  DCHECK_EQ(2, args.length());
+  Handle<Object> obj = args.at(0);
+  return *obj;
+}
+
 namespace {
 
 void GetOsrOffsetAndFunctionForOSR(Isolate* isolate, BytecodeOffset* osr_offset,
@@ -539,6 +547,26 @@ RUNTIME_FUNCTION(Runtime_CompileOptimizedOSRFromMaglev) {
   MaglevFrame* frame = MaglevFrame::cast(it.frame());
   DCHECK_EQ(frame->LookupCodeT().kind(), CodeKind::MAGLEV);
   Handle<JSFunction> function = handle(frame->function(), isolate);
+
+  // This path is only relevant for tests (all production configurations enable
+  // concurrent OSR). It's quite subtle, if interested read on:
+  if (V8_UNLIKELY(!isolate->concurrent_recompilation_enabled() ||
+                  !v8_flags.concurrent_osr)) {
+    // - Synchronous Turbofan compilation may trigger lazy deoptimization (e.g.
+    //   through compilation dependency finalization actions).
+    // - Maglev (currently) disallows marking an opcode as both can_lazy_deopt
+    //   and can_eager_deopt.
+    // - Maglev's JumpLoop opcode (the logical caller of this runtime function)
+    //   is marked as can_eager_deopt since OSR'ing to Turbofan involves
+    //   deoptimizing to Ignition under the hood.
+    // - Thus this runtime function *must not* trigger a lazy deopt, and
+    //   therefore cannot trigger synchronous Turbofan compilation (see above).
+    //
+    // We solve this synchronous OSR case by bailing out early to Ignition, and
+    // letting it handle OSR. How do we trigger the early bailout? Returning
+    // any non-null Code from this function triggers the deopt in JumpLoop.
+    return function->code();
+  }
 
   return CompileOptimizedOSR(isolate, function, osr_offset);
 }

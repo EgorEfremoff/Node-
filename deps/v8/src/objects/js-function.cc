@@ -474,18 +474,19 @@ MaybeHandle<Object> JSWrappedFunction::Create(
   // 8. If result is an Abrupt Completion, throw a TypeError exception.
   if (is_abrupt.IsNothing()) {
     DCHECK(isolate->has_pending_exception());
+    Handle<Object> pending_exception =
+        Handle<Object>(isolate->pending_exception(), isolate);
     isolate->clear_pending_exception();
-    // TODO(v8:11989): provide a non-observable inspection on the
-    // pending_exception to the newly created TypeError.
-    // https://github.com/tc39/proposal-shadowrealm/issues/353
 
     // The TypeError thrown is created with creation Realm's TypeError
     // constructor instead of the executing Realm's.
+    Handle<JSFunction> type_error_function =
+        Handle<JSFunction>(creation_context->type_error_function(), isolate);
+    Handle<String> string =
+        Object::NoSideEffectsToString(isolate, pending_exception);
     THROW_NEW_ERROR_RETURN_VALUE(
         isolate,
-        NewError(Handle<JSFunction>(creation_context->type_error_function(),
-                                    isolate),
-                 MessageTemplate::kCannotWrap),
+        NewError(type_error_function, MessageTemplate::kCannotWrap, string),
         {});
   }
   DCHECK(is_abrupt.FromJust());
@@ -689,7 +690,7 @@ void SetInstancePrototype(Isolate* isolate, Handle<JSFunction> function,
     // needed.  At that point, a new initial map is created and the
     // prototype is put into the initial map where it belongs.
     function->set_prototype_or_initial_map(*value, kReleaseStore);
-    if (value->IsJSObject()) {
+    if (value->IsJSObjectThatCanBeTrackedAsPrototype()) {
       // Optimize as prototype to detach it from its transition tree.
       JSObject::OptimizeAsPrototype(Handle<JSObject>::cast(value));
     }
@@ -745,10 +746,11 @@ void JSFunction::SetInitialMap(Isolate* isolate, Handle<JSFunction> function,
 
 void JSFunction::SetInitialMap(Isolate* isolate, Handle<JSFunction> function,
                                Handle<Map> map, Handle<HeapObject> prototype,
-                               Handle<JSFunction> constructor) {
+                               Handle<HeapObject> constructor) {
   if (map->prototype() != *prototype) {
     Map::SetPrototype(isolate, map, prototype);
   }
+  DCHECK_IMPLIES(!constructor->IsJSFunction(), map->InSharedHeap());
   map->SetConstructor(*constructor);
   function->set_prototype_or_initial_map(*map, kReleaseStore);
   if (v8_flags.log_maps) {

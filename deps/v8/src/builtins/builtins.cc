@@ -412,7 +412,6 @@ Handle<Code> Builtins::GenerateOffHeapTrampolineFor(
 
   return Factory::CodeBuilder(isolate, desc, CodeKind::BUILTIN)
       .set_kind_specific_flags(kind_specific_flags)
-      .set_read_only_data_container(!V8_EXTERNAL_CODE_SPACE_BOOL)
       .set_self_reference(generator.CodeObject())
       .set_is_executable(generate_jump_to_instruction_stream)
       .Build();
@@ -478,7 +477,6 @@ Handle<Code> Builtins::CreateInterpreterEntryTrampolineForProfiling(
 
   return Factory::CodeBuilder(isolate, desc, CodeKind::BUILTIN)
       .set_kind_specific_flags(kind_specific_flags)
-      .set_read_only_data_container(false)
       // Mimic the InterpreterEntryTrampoline.
       .set_builtin(Builtin::kInterpreterEntryTrampoline)
       .set_is_executable(true)
@@ -570,7 +568,7 @@ bool Builtins::CodeObjectIsExecutable(Builtin builtin) {
 
     // TODO(delphick): Remove this when calls to it have the trampoline inlined
     // or are converted to use kCallBuiltinPointer.
-    case Builtin::kCEntry_Return1_DontSaveFPRegs_ArgvOnStack_NoBuiltinExit:
+    case Builtin::kCEntry_Return1_ArgvOnStack_NoBuiltinExit:
       return true;
     default:
 #if V8_TARGET_ARCH_MIPS64

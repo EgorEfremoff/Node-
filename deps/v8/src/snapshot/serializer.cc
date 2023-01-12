@@ -571,11 +571,11 @@ void Serializer::ObjectSerializer::SerializeJSArrayBuffer() {
       uint32_t ref =
           SerializeBackingStore(backing_store, byte_length, max_byte_length);
       buffer.SetBackingStoreRefForSerialization(ref);
-
-      // Ensure deterministic output by setting extension to null during
-      // serialization.
-      buffer.set_extension(nullptr);
     }
+
+    // Ensure deterministic output by setting extension to null during
+    // serialization.
+    buffer.set_extension(nullptr);
   }
   SerializeObject();
   {
@@ -1197,15 +1197,8 @@ void Serializer::ObjectSerializer::OutputRawData(Address up_to) {
     }
 #ifdef MEMORY_SANITIZER
     // Check that we do not serialize uninitialized memory.
-    int msan_bytes_to_output = bytes_to_output;
-    if (object_->IsSeqString()) {
-      // SeqStrings may have uninitialized padding bytes. These padding
-      // bytes are never read and serialized as 0s.
-      msan_bytes_to_output -=
-          SeqString::cast(*object_).GetDataAndPaddingSizes().padding_size;
-    }
     __msan_check_mem_is_initialized(
-        reinterpret_cast<void*>(object_start + base), msan_bytes_to_output);
+        reinterpret_cast<void*>(object_start + base), bytes_to_output);
 #endif  // MEMORY_SANITIZER
     PtrComprCageBase cage_base(isolate_);
     if (object_->IsBytecodeArray(cage_base)) {
@@ -1368,6 +1361,29 @@ Handle<FixedArray> ObjectCacheIndexMap::Values(Isolate* isolate) {
   }
 
   return externals;
+}
+
+bool Serializer::SerializeReadOnlyObjectReference(HeapObject obj,
+                                                  SnapshotByteSink* sink) {
+  if (!ReadOnlyHeap::Contains(obj)) return false;
+
+  // For objects on the read-only heap, never serialize the object, but instead
+  // create a back reference that encodes the page number as the chunk_index and
+  // the offset within the page as the chunk_offset.
+  Address address = obj.address();
+  BasicMemoryChunk* chunk = BasicMemoryChunk::FromAddress(address);
+  uint32_t chunk_index = 0;
+  ReadOnlySpace* const read_only_space = isolate()->heap()->read_only_space();
+  DCHECK(!read_only_space->writable());
+  for (ReadOnlyPage* page : read_only_space->pages()) {
+    if (chunk == page) break;
+    ++chunk_index;
+  }
+  uint32_t chunk_offset = static_cast<uint32_t>(chunk->Offset(address));
+  sink->Put(kReadOnlyHeapRef, "ReadOnlyHeapRef");
+  sink->PutInt(chunk_index, "ReadOnlyHeapRefChunkIndex");
+  sink->PutInt(chunk_offset, "ReadOnlyHeapRefChunkOffset");
+  return true;
 }
 
 }  // namespace internal

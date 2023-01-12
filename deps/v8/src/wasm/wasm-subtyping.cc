@@ -141,10 +141,11 @@ bool IsNullSentinel(HeapType type) {
 bool ValidSubtypeDefinition(uint32_t subtype_index, uint32_t supertype_index,
                             const WasmModule* sub_module,
                             const WasmModule* super_module) {
-  TypeDefinition::Kind sub_kind = sub_module->types[subtype_index].kind;
-  TypeDefinition::Kind super_kind = super_module->types[supertype_index].kind;
-  if (sub_kind != super_kind) return false;
-  switch (sub_kind) {
+  const TypeDefinition& subtype = sub_module->types[subtype_index];
+  const TypeDefinition& supertype = super_module->types[supertype_index];
+  if (subtype.kind != supertype.kind) return false;
+  if (supertype.is_final) return false;
+  switch (subtype.kind) {
     case TypeDefinition::kFunction:
       return ValidFunctionSubtypeDefinition(subtype_index, supertype_index,
                                             sub_module, super_module);
@@ -214,13 +215,6 @@ V8_NOINLINE V8_EXPORT_PRIVATE bool IsHeapSubtypeOfImpl(
     case HeapType::kI31:
     case HeapType::kStruct:
     case HeapType::kArray:
-      if (v8_flags.wasm_gc_structref_as_dataref &&
-          sub_heap.representation() == HeapType::kArray) {
-        // TODO(7748): Remove temporary workaround for backwards compatibility.
-        return super_heap == HeapType::kArray ||
-               super_heap == HeapType::kStruct || super_heap == HeapType::kEq ||
-               super_heap == HeapType::kAny;
-      }
       return super_heap == sub_heap || super_heap == HeapType::kEq ||
              super_heap == HeapType::kAny;
     case HeapType::kString:
@@ -263,10 +257,7 @@ V8_NOINLINE V8_EXPORT_PRIVATE bool IsHeapSubtypeOfImpl(
     case HeapType::kFunc:
       return sub_module->has_signature(sub_index);
     case HeapType::kStruct:
-      if (!v8_flags.wasm_gc_structref_as_dataref) {
-        return sub_module->has_struct(sub_index);
-      }
-      V8_FALLTHROUGH;
+      return sub_module->has_struct(sub_index);
     case HeapType::kEq:
     case HeapType::kAny:
       return !sub_module->has_signature(sub_index);
@@ -355,10 +346,6 @@ HeapType::Representation CommonAncestor(uint32_t type_index1,
       DCHECK_EQ(kind2, kind1);
       return HeapType::kFunc;
     case TypeDefinition::kStruct:
-      if (v8_flags.wasm_gc_structref_as_dataref) {
-        DCHECK_NE(kind2, TypeDefinition::kFunction);
-        return HeapType::kStruct;
-      }
       switch (kind2) {
         case TypeDefinition::kFunction:
           UNREACHABLE();
@@ -372,8 +359,7 @@ HeapType::Representation CommonAncestor(uint32_t type_index1,
         case TypeDefinition::kFunction:
           UNREACHABLE();
         case TypeDefinition::kStruct:
-          return v8_flags.wasm_gc_structref_as_dataref ? HeapType::kStruct
-                                                       : HeapType::kEq;
+          return HeapType::kEq;
         case TypeDefinition::kArray:
           return HeapType::kArray;
       }
@@ -424,8 +410,7 @@ HeapType::Representation CommonAncestorWithGeneric(HeapType heap1,
         case HeapType::kNone:
           return HeapType::kStruct;
         case HeapType::kArray:
-          return v8_flags.wasm_gc_structref_as_dataref ? HeapType::kStruct
-                                                       : HeapType::kEq;
+          return HeapType::kEq;
         case HeapType::kI31:
         case HeapType::kEq:
           return HeapType::kEq;
@@ -439,7 +424,6 @@ HeapType::Representation CommonAncestorWithGeneric(HeapType heap1,
         default:
           return module2->has_signature(heap2.ref_index()) ? HeapType::kBottom
                  : module2->has_struct(heap2.ref_index())  ? HeapType::kStruct
-                 : v8_flags.wasm_gc_structref_as_dataref   ? HeapType::kStruct
                                                            : HeapType::kEq;
       }
     case HeapType::kArray:
@@ -448,8 +432,7 @@ HeapType::Representation CommonAncestorWithGeneric(HeapType heap1,
         case HeapType::kNone:
           return HeapType::kArray;
         case HeapType::kStruct:
-          return v8_flags.wasm_gc_structref_as_dataref ? HeapType::kStruct
-                                                       : HeapType::kEq;
+          return HeapType::kEq;
         case HeapType::kI31:
         case HeapType::kEq:
           return HeapType::kEq;
@@ -461,12 +444,9 @@ HeapType::Representation CommonAncestorWithGeneric(HeapType heap1,
         case HeapType::kNoFunc:
           UNREACHABLE();
         default:
-          return module2->has_array(heap2.ref_index()) ? HeapType::kArray
-                 : module2->has_struct(heap2.ref_index())
-                     ? (v8_flags.wasm_gc_structref_as_dataref
-                            ? HeapType::kStruct
-                            : HeapType::kEq)
-                     : HeapType::kBottom;
+          return module2->has_array(heap2.ref_index())    ? HeapType::kArray
+                 : module2->has_struct(heap2.ref_index()) ? HeapType::kEq
+                                                          : HeapType::kBottom;
       }
     case HeapType::kAny:
       return HeapType::kAny;

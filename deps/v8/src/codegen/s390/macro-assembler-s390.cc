@@ -854,8 +854,21 @@ void TurboAssembler::MultiPopF64OrV128(DoubleRegList dregs, Register scratch,
 #endif
 }
 
+void TurboAssembler::LoadTaggedRoot(Register destination, RootIndex index) {
+  ASM_CODE_COMMENT(this);
+  if (V8_STATIC_ROOTS_BOOL && RootsTable::IsReadOnly(index)) {
+    mov(destination, Operand(ReadOnlyRootPtr(index), RelocInfo::Mode::NO_INFO));
+    return;
+  }
+  LoadRoot(destination, index);
+}
+
 void TurboAssembler::LoadRoot(Register destination, RootIndex index,
                               Condition) {
+  if (V8_STATIC_ROOTS_BOOL && RootsTable::IsReadOnly(index)) {
+    DecompressTaggedPointer(destination, ReadOnlyRootPtr(index));
+    return;
+  }
   LoadU64(destination,
           MemOperand(kRootRegister, RootRegisterOffsetForRootIndex(index)), r0);
 }
@@ -933,6 +946,13 @@ void TurboAssembler::DecompressTaggedPointer(Register destination,
   llgf(destination, field_operand);
   agr(destination, kRootRegister);
   RecordComment("]");
+}
+
+void TurboAssembler::DecompressTaggedPointer(const Register& destination,
+                                             Tagged_t immediate) {
+  ASM_CODE_COMMENT(this);
+  mov(destination, Operand(immediate, RelocInfo::NO_INFO));
+  agr(destination, kRootRegister);
 }
 
 void TurboAssembler::DecompressAnyTagged(Register destination,
@@ -1542,7 +1562,7 @@ int TurboAssembler::LeaveFrame(StackFrame::Type type, int stack_adjustment) {
 // gaps
 // Args
 // ABIRes <- newSP
-void MacroAssembler::EnterExitFrame(bool save_doubles, int stack_space,
+void MacroAssembler::EnterExitFrame(int stack_space,
                                     StackFrame::Type frame_type) {
   DCHECK(frame_type == StackFrame::EXIT ||
          frame_type == StackFrame::BUILTIN_EXIT);
@@ -1573,15 +1593,6 @@ void MacroAssembler::EnterExitFrame(bool save_doubles, int stack_space,
   Move(r1,
        ExternalReference::Create(IsolateAddressId::kContextAddress, isolate()));
   StoreU64(cp, MemOperand(r1));
-
-  // Optionally save all volatile double registers.
-  if (save_doubles) {
-    MultiPushDoubles(kCallerSavedDoubles);
-    // Note that d0 will be accessible at
-    //   fp - ExitFrameConstants::kFrameSize -
-    //   kNumCallerSavedDoubles * kDoubleSize,
-    // since the sp slot and code slot were pushed after the fp.
-  }
 
   lay(sp, MemOperand(sp, -stack_space * kSystemPointerSize));
 
@@ -1617,17 +1628,8 @@ int TurboAssembler::ActivationFrameAlignment() {
 #endif
 }
 
-void MacroAssembler::LeaveExitFrame(bool save_doubles, Register argument_count,
+void MacroAssembler::LeaveExitFrame(Register argument_count,
                                     bool argument_count_is_length) {
-  // Optionally restore all double registers.
-  if (save_doubles) {
-    // Calculate the stack location of the saved doubles and restore them.
-    const int kNumRegs = kNumCallerSavedDoubles;
-    lay(r5, MemOperand(fp, -(ExitFrameConstants::kFixedFrameSizeFromFp +
-                             kNumRegs * kDoubleSize)));
-    MultiPopDoubles(kCallerSavedDoubles, r5);
-  }
-
   // Clear top frame.
   Move(ip, ExternalReference::Create(IsolateAddressId::kCEntryFPAddress,
                                      isolate()));
@@ -1961,6 +1963,10 @@ void MacroAssembler::CompareInstanceTypeRange(Register map, Register type_reg,
 }
 
 void MacroAssembler::CompareRoot(Register obj, RootIndex index) {
+  if (V8_STATIC_ROOTS_BOOL && RootsTable::IsReadOnly(index)) {
+    CompareTagged(obj, Operand(ReadOnlyRootPtr(index)));
+    return;
+  }
   int32_t offset = RootRegisterOffsetForRootIndex(index);
 #ifdef V8_TARGET_BIG_ENDIAN
   offset += (COMPRESS_POINTERS_BOOL ? kTaggedSize : 0);
@@ -2163,8 +2169,8 @@ void MacroAssembler::OptimizeCodeOrTailCallOptimizedCodeSlot(
   TailCallOptimizedCodeSlot(this, optimized_code_entry, r8);
 }
 
-void MacroAssembler::CallRuntime(const Runtime::Function* f, int num_arguments,
-                                 SaveFPRegsMode save_doubles) {
+void MacroAssembler::CallRuntime(const Runtime::Function* f,
+                                 int num_arguments) {
   // All parameters are on the stack.  r2 has the return value after call.
 
   // If the expected number of arguments of the runtime function is
@@ -2179,10 +2185,9 @@ void MacroAssembler::CallRuntime(const Runtime::Function* f, int num_arguments,
   mov(r2, Operand(num_arguments));
   Move(r3, ExternalReference::Create(f));
 #if V8_TARGET_ARCH_S390X
-  Handle<Code> code =
-      CodeFactory::CEntry(isolate(), f->result_size, save_doubles);
+  Handle<Code> code = CodeFactory::CEntry(isolate(), f->result_size);
 #else
-  Handle<Code> code = CodeFactory::CEntry(isolate(), 1, save_doubles);
+  Handle<Code> code = CodeFactory::CEntry(isolate(), 1);
 #endif
 
   Call(code, RelocInfo::CODE_TARGET);
@@ -2200,8 +2205,8 @@ void MacroAssembler::TailCallRuntime(Runtime::FunctionId fid) {
 void MacroAssembler::JumpToExternalReference(const ExternalReference& builtin,
                                              bool builtin_exit_frame) {
   Move(r3, builtin);
-  Handle<Code> code = CodeFactory::CEntry(isolate(), 1, SaveFPRegsMode::kIgnore,
-                                          ArgvMode::kStack, builtin_exit_frame);
+  Handle<Code> code =
+      CodeFactory::CEntry(isolate(), 1, ArgvMode::kStack, builtin_exit_frame);
   Jump(code, RelocInfo::CODE_TARGET);
 }
 
@@ -5685,7 +5690,7 @@ SIMD_ALL_TRUE_LIST(EMIT_SIMD_ALL_TRUE)
 #define EMIT_SIMD_QFM(name, op, c1)                                       \
   void TurboAssembler::name(Simd128Register dst, Simd128Register src1,    \
                             Simd128Register src2, Simd128Register src3) { \
-    op(dst, src2, src3, src1, Condition(c1), Condition(0));               \
+    op(dst, src1, src2, src3, Condition(c1), Condition(0));               \
   }
 SIMD_QFM_LIST(EMIT_SIMD_QFM)
 #undef EMIT_SIMD_QFM

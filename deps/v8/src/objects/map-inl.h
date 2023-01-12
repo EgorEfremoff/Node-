@@ -54,7 +54,8 @@ RELEASE_ACQUIRE_WEAK_ACCESSORS(Map, raw_transitions,
 ACCESSORS_CHECKED2(Map, prototype, HeapObject, kPrototypeOffset, true,
                    value.IsNull() || value.IsJSProxy() ||
                        value.IsWasmObject() ||
-                       (value.IsJSObject() && value.map().is_prototype_map()))
+                       (value.IsJSObject() && (value.InSharedWritableHeap() ||
+                                               value.map().is_prototype_map())))
 
 DEF_GETTER(Map, prototype_info, Object) {
   Object value = TaggedField<Object, kTransitionsOrPrototypeInfoOffset>::load(
@@ -64,6 +65,14 @@ DEF_GETTER(Map, prototype_info, Object) {
 }
 RELEASE_ACQUIRE_ACCESSORS(Map, prototype_info, Object,
                           kTransitionsOrPrototypeInfoOffset)
+
+void Map::init_prototype_and_constructor_or_back_pointer(ReadOnlyRoots roots) {
+  HeapObject null = roots.null_value();
+  TaggedField<HeapObject,
+              kConstructorOrBackPointerOrNativeContextOffset>::store(*this,
+                                                                     null);
+  TaggedField<HeapObject, kPrototypeOffset>::store(*this, null);
+}
 
 // |bit_field| fields.
 // Concurrent access to |has_prototype_slot| and |has_non_instance_prototype|

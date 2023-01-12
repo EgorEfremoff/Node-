@@ -836,6 +836,12 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
     // Initialize the root register.
     // C calling convention. The first argument is passed in r3.
     __ mr(kRootRegister, r3);
+
+#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+    // Initialize the pointer cage base register.
+    __ LoadRootRelative(kPtrComprCageBaseRegister,
+                        IsolateData::cage_base_offset());
+#endif
   }
 
   // Push a frame with special values setup to mark it as an entry frame.
@@ -868,7 +874,7 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
 
   Register scratch = r9;
   // Set up frame pointer for the frame to be pushed.
-  __ addi(fp, sp, Operand(-EntryFrameConstants::kCallerFPOffset));
+  __ addi(fp, sp, Operand(-EntryFrameConstants::kNextExitFrameFPOffset));
 
   // If this is the outermost JS call, set js_entry_sp value.
   Label non_outermost_js;
@@ -956,7 +962,7 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
   __ StoreU64(r6, MemOperand(scratch));
 
   // Reset the stack to the callee saved registers.
-  __ addi(sp, sp, Operand(-EntryFrameConstants::kCallerFPOffset));
+  __ addi(sp, sp, Operand(-EntryFrameConstants::kNextExitFrameFPOffset));
 
   // Restore callee-saved double registers.
   __ MultiPopDoubles(kCalleeSavedDoubles);
@@ -2949,8 +2955,7 @@ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
-                               SaveFPRegsMode save_doubles, ArgvMode argv_mode,
-                               bool builtin_exit_frame) {
+                               ArgvMode argv_mode, bool builtin_exit_frame) {
   // Called from JavaScript; parameters are on stack as if calling JS function.
   // r3: number of arguments including receiver
   // r4: pointer to builtin function
@@ -2986,9 +2991,9 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
     arg_stack_space += result_size;
   }
 
-  __ EnterExitFrame(
-      save_doubles == SaveFPRegsMode::kSave, arg_stack_space,
-      builtin_exit_frame ? StackFrame::BUILTIN_EXIT : StackFrame::EXIT);
+  __ EnterExitFrame(arg_stack_space, builtin_exit_frame
+                                         ? StackFrame::BUILTIN_EXIT
+                                         : StackFrame::EXIT);
 
   // Store a copy of argc in callee-saved registers for later.
   __ mr(r14, r3);
@@ -3053,7 +3058,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
                       ? no_reg
                       // r14: still holds argc (callee-saved).
                       : r14;
-  __ LeaveExitFrame(save_doubles == SaveFPRegsMode::kSave, argc);
+  __ LeaveExitFrame(argc, false);
   __ blr();
 
   // Handling of exception.
@@ -3328,7 +3333,7 @@ static void CallApiFunctionAndReturn(MacroAssembler* masm,
   } else {
     __ mov(r14, Operand(stack_space));
   }
-  __ LeaveExitFrame(false, r14, stack_space_operand != nullptr);
+  __ LeaveExitFrame(r14, stack_space_operand != nullptr);
 
   // Check if the function scheduled an exception.
   __ LoadRoot(r14, RootIndex::kTheHoleValue);
@@ -3438,10 +3443,9 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
   //    [1-3] FunctionCallbackInfo
   //    [4] number of bytes to drop from the stack after returning
   static constexpr int kApiStackSpace = 5;
-  static constexpr bool kDontSaveDoubles = false;
 
   FrameScope frame_scope(masm, StackFrame::MANUAL);
-  __ EnterExitFrame(kDontSaveDoubles, kApiStackSpace);
+  __ EnterExitFrame(kApiStackSpace, StackFrame::EXIT);
 
   // FunctionCallbackInfo::implicit_args_ (points at kHolder as set up above).
   // Arguments are after the return address (pushed by EnterExitFrame()).
@@ -3557,7 +3561,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   }
 
   FrameScope frame_scope(masm, StackFrame::MANUAL);
-  __ EnterExitFrame(false, apiStackSpace);
+  __ EnterExitFrame(apiStackSpace, StackFrame::EXIT);
 
   if (!ABI_PASSES_HANDLES_IN_REGS) {
     // pass 1st arg by reference

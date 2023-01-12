@@ -57,6 +57,9 @@ class ReadOnlyHeap {
   // a deserializer was not previously provided to Setup. When V8_SHARED_RO_HEAP
   // is enabled, this releases the ReadOnlyHeap creation lock.
   void OnCreateHeapObjectsComplete(Isolate* isolate);
+  // Indicates that all objects reachable by the read only roots table have been
+  // set up.
+  void OnCreateRootsComplete(Isolate* isolate);
   // Indicates that the current isolate no longer requires the read-only heap
   // and it may be safely disposed of.
   virtual void OnHeapTearDown(Heap* heap);
@@ -74,6 +77,10 @@ class ReadOnlyHeap {
   // specific roots table.
   V8_EXPORT_PRIVATE inline static ReadOnlyRoots GetReadOnlyRoots(
       HeapObject object);
+  // Returns the current isolates roots table during initialization as opposed
+  // to the shared one in case the latter is not initialized yet.
+  V8_EXPORT_PRIVATE inline static ReadOnlyRoots EarlyGetReadOnlyRoots(
+      HeapObject object);
 
   // Extends the read-only object cache with new zero smi and returns a
   // reference to it.
@@ -87,7 +94,7 @@ class ReadOnlyHeap {
 
   // Returns whether the ReadOnlySpace will actually be shared taking into
   // account whether shared memory is available with pointer compression.
-  static bool IsReadOnlySpaceShared() {
+  static constexpr bool IsReadOnlySpaceShared() {
     return V8_SHARED_RO_HEAP_BOOL &&
            (!COMPRESS_POINTERS_BOOL || COMPRESS_POINTERS_IN_SHARED_CAGE_BOOL);
   }
@@ -95,6 +102,8 @@ class ReadOnlyHeap {
   virtual void InitializeIsolateRoots(Isolate* isolate) {}
   virtual void InitializeFromIsolateRoots(Isolate* isolate) {}
   virtual bool IsOwnedByIsolate() { return true; }
+
+  bool roots_init_complete() const { return roots_init_complete_; }
 
  protected:
   friend class ReadOnlyArtifacts;
@@ -115,7 +124,7 @@ class ReadOnlyHeap {
   // (unless sharing is disabled).
   void InitFromIsolate(Isolate* isolate);
 
-  bool init_complete_ = false;
+  bool roots_init_complete_ = false;
   ReadOnlySpace* read_only_space_ = nullptr;
   std::vector<Object> read_only_object_cache_;
 

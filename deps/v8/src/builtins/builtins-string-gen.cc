@@ -124,17 +124,15 @@ TNode<IntPtrT> StringBuiltinsAssembler::SearchOneByteInOneByteString(
 }
 
 void StringBuiltinsAssembler::GenerateStringEqual(TNode<String> left,
-                                                  TNode<String> right) {
+                                                  TNode<String> right,
+                                                  TNode<IntPtrT> length) {
   TVARIABLE(String, var_left, left);
   TVARIABLE(String, var_right, right);
   Label if_equal(this), if_notequal(this), if_indirect(this, Label::kDeferred),
       restart(this, {&var_left, &var_right});
 
-  TNode<IntPtrT> lhs_length = LoadStringLengthAsWord(left);
-  TNode<IntPtrT> rhs_length = LoadStringLengthAsWord(right);
-
-  // Strings with different lengths cannot be equal.
-  GotoIf(WordNotEqual(lhs_length, rhs_length), &if_notequal);
+  CSA_DCHECK(this, IntPtrEqual(LoadStringLengthAsWord(left), length));
+  CSA_DCHECK(this, IntPtrEqual(LoadStringLengthAsWord(right), length));
 
   Goto(&restart);
   BIND(&restart);
@@ -144,7 +142,7 @@ void StringBuiltinsAssembler::GenerateStringEqual(TNode<String> left,
   TNode<Uint16T> lhs_instance_type = LoadInstanceType(lhs);
   TNode<Uint16T> rhs_instance_type = LoadInstanceType(rhs);
 
-  StringEqual_Core(lhs, lhs_instance_type, rhs, rhs_instance_type, lhs_length,
+  StringEqual_Core(lhs, lhs_instance_type, rhs, rhs_instance_type, length,
                    &if_equal, &if_notequal, &if_indirect);
 
   BIND(&if_indirect);
@@ -716,7 +714,8 @@ void StringBuiltinsAssembler::GenerateStringRelationalComparison(
 TF_BUILTIN(StringEqual, StringBuiltinsAssembler) {
   auto left = Parameter<String>(Descriptor::kLeft);
   auto right = Parameter<String>(Descriptor::kRight);
-  GenerateStringEqual(left, right);
+  auto length = UncheckedParameter<IntPtrT>(Descriptor::kLength);
+  GenerateStringEqual(left, right, length);
 }
 
 TF_BUILTIN(StringLessThan, StringBuiltinsAssembler) {
@@ -1289,7 +1288,7 @@ TNode<JSArray> StringBuiltinsAssembler::StringToArray(
 
           StoreFixedArrayElement(elements, index, entry);
         },
-        1, IndexAdvanceMode::kPost);
+        1, LoopUnrollingMode::kNo, IndexAdvanceMode::kPost);
 
     TNode<Map> array_map = LoadJSArrayElementsMap(PACKED_ELEMENTS, context);
     result_array = AllocateJSArray(array_map, elements, length_smi);
@@ -1492,6 +1491,61 @@ TNode<Int32T> StringBuiltinsAssembler::LoadSurrogatePairAt(
   return var_result.value();
 }
 
+TNode<BoolT> StringBuiltinsAssembler::HasUnpairedSurrogate(TNode<String> string,
+                                                           Label* if_indirect) {
+  TNode<Uint16T> instance_type = LoadInstanceType(string);
+  CSA_DCHECK(this, Word32Equal(Word32And(instance_type,
+                                         Int32Constant(kStringEncodingMask)),
+                               Int32Constant(kTwoByteStringTag)));
+  GotoIfNot(Word32Equal(Word32And(instance_type,
+                                  Int32Constant(kIsIndirectStringMask |
+                                                kUncachedExternalStringMask)),
+                        Int32Constant(0)),
+            if_indirect);
+
+  TNode<RawPtrT> string_data = DirectStringData(string, instance_type);
+  TNode<IntPtrT> length = LoadStringLengthAsWord(string);
+
+  const TNode<ExternalReference> has_unpaired_surrogate =
+      ExternalConstant(ExternalReference::has_unpaired_surrogate());
+  return UncheckedCast<BoolT>(
+      CallCFunction(has_unpaired_surrogate, MachineType::Uint32(),
+                    std::make_pair(MachineType::Pointer(), string_data),
+                    std::make_pair(MachineType::IntPtr(), length)));
+}
+
+void StringBuiltinsAssembler::ReplaceUnpairedSurrogates(TNode<String> source,
+                                                        TNode<String> dest,
+                                                        Label* if_indirect) {
+  TNode<Uint16T> source_instance_type = LoadInstanceType(source);
+  CSA_DCHECK(this, Word32Equal(Word32And(source_instance_type,
+                                         Int32Constant(kStringEncodingMask)),
+                               Int32Constant(kTwoByteStringTag)));
+  GotoIfNot(Word32Equal(Word32And(source_instance_type,
+                                  Int32Constant(kIsIndirectStringMask |
+                                                kUncachedExternalStringMask)),
+                        Int32Constant(0)),
+            if_indirect);
+
+  TNode<RawPtrT> source_data = DirectStringData(source, source_instance_type);
+  // The destination string is a freshly allocated SeqString, and so is always
+  // direct.
+  TNode<Uint16T> dest_instance_type = LoadInstanceType(dest);
+  CSA_DCHECK(this, Word32Equal(Word32And(dest_instance_type,
+                                         Int32Constant(kStringEncodingMask)),
+                               Int32Constant(kTwoByteStringTag)));
+  TNode<RawPtrT> dest_data = DirectStringData(dest, dest_instance_type);
+  TNode<IntPtrT> length = LoadStringLengthAsWord(source);
+  CSA_DCHECK(this, IntPtrEqual(length, LoadStringLengthAsWord(dest)));
+
+  const TNode<ExternalReference> replace_unpaired_surrogates =
+      ExternalConstant(ExternalReference::replace_unpaired_surrogates());
+  CallCFunction(replace_unpaired_surrogates, MachineType::Pointer(),
+                std::make_pair(MachineType::Pointer(), source_data),
+                std::make_pair(MachineType::Pointer(), dest_data),
+                std::make_pair(MachineType::IntPtr(), length));
+}
+
 void StringBuiltinsAssembler::BranchIfStringPrimitiveWithNoCustomIteration(
     TNode<Object> object, TNode<Context> context, Label* if_true,
     Label* if_false) {
@@ -1573,7 +1627,7 @@ void StringBuiltinsAssembler::CopyStringCharacters(
           Increment(&current_to_offset, to_increment);
         }
       },
-      from_increment, IndexAdvanceMode::kPost);
+      from_increment, LoopUnrollingMode::kYes, IndexAdvanceMode::kPost);
 }
 
 // A wrapper around CopyStringCharacters which determines the correct string

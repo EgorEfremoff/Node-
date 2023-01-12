@@ -1168,9 +1168,7 @@ MaybeHandle<Object> Object::GetProperty(LookupIterator* it,
         return result;
       }
       case LookupIterator::WASM_OBJECT:
-        THROW_NEW_ERROR(it->isolate(),
-                        NewTypeError(MessageTemplate::kWasmObjectsAreOpaque),
-                        Object);
+        return it->isolate()->factory()->undefined_value();
       case LookupIterator::INTERCEPTOR: {
         bool done;
         Handle<Object> result;
@@ -5874,7 +5872,7 @@ template <typename Derived, typename Shape>
 void HashTable<Derived, Shape>::Rehash(PtrComprCageBase cage_base) {
   DisallowGarbageCollection no_gc;
   WriteBarrierMode mode = GetWriteBarrierMode(no_gc);
-  ReadOnlyRoots roots = GetReadOnlyRoots(cage_base);
+  ReadOnlyRoots roots = EarlyGetReadOnlyRoots();
   uint32_t capacity = Capacity();
   bool done = false;
   for (int probe = 1; !done; probe++) {

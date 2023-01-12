@@ -287,7 +287,7 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
     }
     __ CheckPageFlag(
         value_, MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
-        ne, exit());
+        eq, exit());
     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
                                             ? SaveFPRegsMode::kSave
                                             : SaveFPRegsMode::kIgnore;
@@ -652,27 +652,7 @@ void CodeGenerator::AssembleCodeStartRegisterCheck() {
   __ Assert(eq, AbortReason::kWrongFunctionCodeStart);
 }
 
-// Check if the code object is marked for deoptimization. If it is, then it
-// jumps to the CompileLazyDeoptimizedCode builtin. In order to do this we need
-// to:
-//    1. read from memory the word that contains that bit, which can be found in
-//       the flags in the referenced {CodeDataContainer} object;
-//    2. test kMarkedForDeoptimizationBit in those flags; and
-//    3. if it is not zero then it jumps to the builtin.
-void CodeGenerator::BailoutIfDeoptimized() {
-  UseScratchRegisterScope temps(tasm());
-  Register scratch = temps.AcquireX();
-  int offset = Code::kCodeDataContainerOffset - Code::kHeaderSize;
-  __ LoadTaggedPointerField(
-      scratch, MemOperand(kJavaScriptCallCodeStartRegister, offset));
-  __ Ldr(scratch.W(),
-         FieldMemOperand(scratch, CodeDataContainer::kKindSpecificFlagsOffset));
-  Label not_deoptimized;
-  __ Tbz(scratch.W(), Code::kMarkedForDeoptimizationBit, &not_deoptimized);
-  __ Jump(BUILTIN_CODE(isolate(), CompileLazyDeoptimizedCode),
-          RelocInfo::CODE_TARGET);
-  __ Bind(&not_deoptimized);
-}
+void CodeGenerator::BailoutIfDeoptimized() { __ BailoutIfDeoptimized(); }
 
 // Assembles an instruction after register allocation, producing machine code.
 CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
@@ -976,7 +956,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ JumpIfSmi(value, ool->exit());
       }
       __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask,
-                       eq, ool->entry());
+                       ne, ool->entry());
       __ Bind(ool->exit());
       break;
     }
@@ -995,7 +975,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ JumpIfSmi(value, ool->exit());
       }
       __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask,
-                       eq, ool->entry());
+                       ne, ool->entry());
       __ Bind(ool->exit());
       break;
     }
@@ -2178,6 +2158,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
              i.InputSimd128Register(2).Format(f));                     \
     break;                                                             \
   }
+#define SIMD_DESTRUCTIVE_RELAXED_FUSED_CASE(Op, Instr, FORMAT) \
+  case Op: {                                                   \
+    VRegister dst = i.OutputSimd128Register().V##FORMAT();     \
+    DCHECK_EQ(dst, i.InputSimd128Register(2).V##FORMAT());     \
+    __ Instr(dst, i.InputSimd128Register(0).V##FORMAT(),       \
+             i.InputSimd128Register(1).V##FORMAT());           \
+    break;                                                     \
+  }
       SIMD_BINOP_LANE_SIZE_CASE(kArm64FMin, Fmin);
       SIMD_BINOP_LANE_SIZE_CASE(kArm64FMax, Fmax);
       SIMD_UNOP_LANE_SIZE_CASE(kArm64FAbs, Fabs);
@@ -2293,8 +2281,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       SIMD_FCM_L_CASE(kArm64FLe, le, ge);
       SIMD_FCM_G_CASE(kArm64FGt, gt);
       SIMD_FCM_G_CASE(kArm64FGe, ge);
-      SIMD_DESTRUCTIVE_BINOP_CASE(kArm64F64x2Qfma, Fmla, 2D);
-      SIMD_DESTRUCTIVE_BINOP_CASE(kArm64F64x2Qfms, Fmls, 2D);
+      SIMD_DESTRUCTIVE_RELAXED_FUSED_CASE(kArm64F64x2Qfma, Fmla, 2D);
+      SIMD_DESTRUCTIVE_RELAXED_FUSED_CASE(kArm64F64x2Qfms, Fmls, 2D);
     case kArm64F64x2Pmin: {
       VRegister dst = i.OutputSimd128Register().V2D();
       VRegister lhs = i.InputSimd128Register(0).V2D();
@@ -2327,8 +2315,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
               i.InputSimd128Register(1).Format(s_f), i.InputInt8(2));
       break;
     }
-      SIMD_DESTRUCTIVE_BINOP_CASE(kArm64F32x4Qfma, Fmla, 4S);
-      SIMD_DESTRUCTIVE_BINOP_CASE(kArm64F32x4Qfms, Fmls, 4S);
+      SIMD_DESTRUCTIVE_RELAXED_FUSED_CASE(kArm64F32x4Qfma, Fmla, 4S);
+      SIMD_DESTRUCTIVE_RELAXED_FUSED_CASE(kArm64F32x4Qfms, Fmls, 4S);
     case kArm64F32x4Pmin: {
       VRegister dst = i.OutputSimd128Register().V4S();
       VRegister lhs = i.InputSimd128Register(0).V4S();
@@ -2915,6 +2903,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
 #undef SIMD_BINOP_LANE_SIZE_CASE
 #undef SIMD_DESTRUCTIVE_BINOP_CASE
 #undef SIMD_DESTRUCTIVE_BINOP_LANE_SIZE_CASE
+#undef SIMD_DESTRUCTIVE_RELAXED_FUSED_CASE
 #undef SIMD_REDUCE_OP_CASE
 #undef ASSEMBLE_SIMD_SHIFT_LEFT
 #undef ASSEMBLE_SIMD_SHIFT_RIGHT
@@ -3235,6 +3224,9 @@ void CodeGenerator::AssembleConstructFrame() {
         Register scratch = temps.AcquireX();
         __ Mov(scratch,
                StackFrame::TypeToMarker(info()->GetOutputStackFrameType()));
+        // This stack slot is only used for printing stack traces in V8. Also,
+        // it holds a WasmApiFunctionRef instead of the instance itself, which
+        // is taken care of in the frames accessors.
         __ Push(scratch, kWasmInstanceRegister);
         int extra_slots =
             call_descriptor->kind() == CallDescriptor::kCallWasmImportWrapper
@@ -3397,6 +3389,66 @@ void CodeGenerator::PrepareForDeoptimizationExits(
   }
 }
 
+AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
+  auto rep = LocationOperand::cast(source)->representation();
+  int new_slots = RoundUp<2>(ElementSizeInPointers(rep));
+  Arm64OperandConverter g(this, nullptr);
+  int last_frame_slot_id =
+      frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
+  int sp_delta = frame_access_state_->sp_delta();
+  int slot_id = last_frame_slot_id + sp_delta + new_slots;
+  AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
+  if (source->IsRegister()) {
+    __ Push(padreg, g.ToRegister(source));
+    frame_access_state()->IncreaseSPDelta(new_slots);
+  } else if (source->IsStackSlot()) {
+    UseScratchRegisterScope temps(tasm());
+    Register scratch = temps.AcquireX();
+    __ Ldr(scratch, g.ToMemOperand(source, tasm()));
+    __ Push(padreg, scratch);
+    frame_access_state()->IncreaseSPDelta(new_slots);
+  } else {
+    // No push instruction for this operand type. Bump the stack pointer and
+    // assemble the move.
+    __ Sub(sp, sp, Operand(new_slots * kSystemPointerSize));
+    frame_access_state()->IncreaseSPDelta(new_slots);
+    AssembleMove(source, &stack_slot);
+  }
+  temp_slots_ += new_slots;
+  return stack_slot;
+}
+
+void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
+  int new_slots = RoundUp<2>(ElementSizeInPointers(rep));
+  frame_access_state()->IncreaseSPDelta(-new_slots);
+  Arm64OperandConverter g(this, nullptr);
+  if (dest->IsRegister()) {
+    __ Pop(g.ToRegister(dest), padreg);
+  } else if (dest->IsStackSlot()) {
+    UseScratchRegisterScope temps(tasm());
+    Register scratch = temps.AcquireX();
+    __ Pop(scratch, padreg);
+    __ Str(scratch, g.ToMemOperand(dest, tasm()));
+  } else {
+    int last_frame_slot_id =
+        frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
+    int sp_delta = frame_access_state_->sp_delta();
+    int slot_id = last_frame_slot_id + sp_delta + new_slots;
+    AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
+    AssembleMove(&stack_slot, dest);
+    __ Add(sp, sp, Operand(new_slots * kSystemPointerSize));
+  }
+  temp_slots_ -= new_slots;
+}
+
+void CodeGenerator::PopTempStackSlots() {
+  if (temp_slots_ > 0) {
+    frame_access_state()->IncreaseSPDelta(-temp_slots_);
+    __ add(sp, sp, Operand(temp_slots_ * kSystemPointerSize));
+    temp_slots_ = 0;
+  }
+}
+
 void CodeGenerator::MoveToTempLocation(InstructionOperand* source) {
   // Must be kept in sync with {MoveTempLocationTo}.
   DCHECK(!source->IsImmediate());
@@ -3452,27 +3504,7 @@ void CodeGenerator::MoveToTempLocation(InstructionOperand* source) {
   } else {
     // The scratch registers are blocked by pending moves. Use the stack
     // instead.
-    int new_slots = RoundUp<2>(ElementSizeInPointers(rep));
-    Arm64OperandConverter g(this, nullptr);
-    if (source->IsRegister()) {
-      __ Push(g.ToRegister(source), padreg);
-    } else if (source->IsStackSlot()) {
-      UseScratchRegisterScope temps2(tasm());
-      Register scratch = temps2.AcquireX();
-      __ Ldr(scratch, g.ToMemOperand(source, tasm()));
-      __ Push(scratch, padreg);
-    } else {
-      // No push instruction for this operand type. Bump the stack pointer and
-      // assemble the move.
-      int last_frame_slot_id =
-          frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
-      int sp_delta = frame_access_state_->sp_delta();
-      int temp_slot = last_frame_slot_id + sp_delta + new_slots;
-      __ Sub(sp, sp, Operand(new_slots * kSystemPointerSize));
-      AllocatedOperand temp(LocationOperand::STACK_SLOT, rep, temp_slot);
-      AssembleMove(source, &temp);
-    }
-    frame_access_state()->IncreaseSPDelta(new_slots);
+    Push(source);
   }
 }
 
@@ -3499,25 +3531,7 @@ void CodeGenerator::MoveTempLocationTo(InstructionOperand* dest,
       AssembleMove(&scratch, dest);
     }
   } else {
-    int new_slots = RoundUp<2>(ElementSizeInPointers(rep));
-    frame_access_state()->IncreaseSPDelta(-new_slots);
-    Arm64OperandConverter g(this, nullptr);
-    if (dest->IsRegister()) {
-      __ Pop(padreg, g.ToRegister(dest));
-    } else if (dest->IsStackSlot()) {
-      UseScratchRegisterScope temps2(tasm());
-      Register scratch = temps2.AcquireX();
-      __ Pop(padreg, scratch);
-      __ Str(scratch, g.ToMemOperand(dest, tasm()));
-    } else {
-      int last_frame_slot_id =
-          frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
-      int sp_delta = frame_access_state_->sp_delta();
-      int temp_slot = last_frame_slot_id + sp_delta + new_slots;
-      AllocatedOperand temp(LocationOperand::STACK_SLOT, rep, temp_slot);
-      AssembleMove(&temp, dest);
-      __ Add(sp, sp, Operand(new_slots * kSystemPointerSize));
-    }
+    Pop(dest, rep);
   }
   // Restore the default state to release the {UseScratchRegisterScope} and to
   // prepare for the next cycle.
@@ -3573,7 +3587,7 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
       Handle<HeapObject> src_object = src.ToHeapObject();
       RootIndex index;
       if (IsMaterializableFromRoot(src_object, &index)) {
-        __ LoadRoot(dst, index);
+        __ LoadTaggedRoot(dst, index);
       } else {
         // TODO(v8:8977): Even though this mov happens on 32 bits (Note the
         // .W()) and we are passing along the RelocInfo, we still haven't made

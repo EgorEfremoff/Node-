@@ -640,8 +640,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<WasmExportedFunctionData> NewWasmExportedFunctionData(
       Handle<CodeT> export_wrapper, Handle<WasmInstanceObject> instance,
       Address call_target, Handle<Object> ref, int func_index,
-      const wasm::FunctionSig* sig, int wrapper_budget, Handle<Map> rtt,
-      wasm::Promise promise);
+      const wasm::FunctionSig* sig, uint32_t canonical_type_index,
+      int wrapper_budget, Handle<Map> rtt, wasm::Promise promise);
   Handle<WasmApiFunctionRef> NewWasmApiFunctionRef(
       Handle<JSReceiver> callable, wasm::Suspend suspend,
       Handle<WasmInstanceObject> instance);
@@ -696,6 +696,11 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       size_t byte_length, InitializedFlag initialized,
       AllocationType allocation = AllocationType::kYoung);
 
+  MaybeHandle<JSArrayBuffer> NewJSArrayBufferAndBackingStore(
+      size_t byte_length, size_t max_byte_length, InitializedFlag initialized,
+      ResizableFlag resizable = ResizableFlag::kNotResizable,
+      AllocationType allocation = AllocationType::kYoung);
+
   Handle<JSArrayBuffer> NewJSSharedArrayBuffer(
       std::shared_ptr<BackingStore> backing_store);
 
@@ -706,10 +711,12 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // Creates a new JSTypedArray with the specified buffer.
   Handle<JSTypedArray> NewJSTypedArray(ExternalArrayType type,
                                        Handle<JSArrayBuffer> buffer,
-                                       size_t byte_offset, size_t length);
+                                       size_t byte_offset, size_t length,
+                                       bool is_length_tracking = false);
 
   Handle<JSDataView> NewJSDataView(Handle<JSArrayBuffer> buffer,
-                                   size_t byte_offset, size_t byte_length);
+                                   size_t byte_offset, size_t byte_length,
+                                   bool is_length_tracking = false);
 
   Handle<JSIteratorResult> NewJSIteratorResult(Handle<Object> value, bool done);
   Handle<JSAsyncFromSyncIterator> NewJSAsyncFromSyncIterator(
@@ -1004,15 +1011,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       return *this;
     }
 
-    // Indicates the CodeDataContainer should be allocated in read-only space.
-    // As an optimization, if the kind-specific flags match that of a canonical
-    // container, it will be used instead.
-    CodeBuilder& set_read_only_data_container(bool read_only) {
-      CHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !read_only);
-      read_only_data_container_ = read_only;
-      return *this;
-    }
-
     CodeBuilder& set_kind_specific_flags(int32_t flags) {
       kind_specific_flags_ = flags;
       return *this;
@@ -1054,7 +1052,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
     Handle<HeapObject> interpreter_data_;
     BasicBlockProfilerData* profiler_data_ = nullptr;
     bool is_executable_ = true;
-    bool read_only_data_container_ = false;
     bool is_turbofanned_ = false;
     int stack_slots_ = 0;
   };
